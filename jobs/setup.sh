@@ -8,6 +8,9 @@ REPO_DIR="${HOME}/${REPO_NAME}"
 SIF_DIR="${HPCVAULT}/${REPO_NAME}/containers"
 SIF_PATH="${SIF_DIR}/pytorch.sif"
 DATA_ROOT="${HPCVAULT}/${REPO_NAME}/data"
+OVERLAY_DIR="${HPCVAULT}/${REPO_NAME}/overlays"
+OVERLAY_PATH="${OVERLAY_DIR}/python-overlay.ext3"
+OVERLAY_SIZE_MB="${OVERLAY_SIZE_MB:-16384}"
 
 if [[ ! -d "${REPO_DIR}" ]]; then
   echo "[setup] Expected repository checkout at ${REPO_DIR}" >&2
@@ -19,13 +22,21 @@ if ! command -v apptainer >/dev/null 2>&1; then
   exit 1
 fi
 
-mkdir -p "${SIF_DIR}" "${DATA_ROOT}" "${HPCVAULT}/${REPO_NAME}/job_logs" \
+mkdir -p "${SIF_DIR}" "${DATA_ROOT}" "${OVERLAY_DIR}" \
+         "${HPCVAULT}/${REPO_NAME}/job_logs" \
          "${HPCVAULT}/${REPO_NAME}/checkpoints" "${HPCVAULT}/${REPO_NAME}/hydra"
 
 cd "${REPO_DIR}"
 
-if [[ ! -d "${REPO_DIR}/.venv" ]] || [[ "${FORCE_VENV_REFRESH:-0}" == "1" ]]; then
-  bash "${REPO_DIR}/scripts/setup_venv.sh"
+if [[ "${FORCE_OVERLAY_REFRESH:-0}" == "1" ]] && [[ -f "${OVERLAY_PATH}" ]]; then
+  rm -f "${OVERLAY_PATH}"
+fi
+
+if [[ ! -f "${OVERLAY_PATH}" ]]; then
+  echo "[setup] Creating Apptainer overlay at ${OVERLAY_PATH}" >&2
+  apptainer overlay create --size "${OVERLAY_SIZE_MB}" "${OVERLAY_PATH}"
+else
+  echo "[setup] Reusing Apptainer overlay at ${OVERLAY_PATH}" >&2
 fi
 
 FORCE_REBUILD=0
@@ -58,6 +69,7 @@ ARC_INPUT_PREFIX="${REPO_DIR}/kaggle/combined/arc-agi"
 
 apptainer exec --nv --cleanenv \
   --bind "${HPCVAULT}:${HPCVAULT}","${REPO_DIR}:${REPO_DIR}" \
+  --overlay "${OVERLAY_PATH}" \
   --pwd "${REPO_DIR}" \
   --env-file hpcvault.env \
   --env PYTHONNOUSERSITE=1 \
