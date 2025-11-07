@@ -11,7 +11,7 @@ From: dockerhub-mirror3.rrze.uni-erlangen.de/pytorch/pytorch:latest
     export TORCH_CUDA_ARCH_LIST="80;86;89;90"
 
 %files
-    apptainer/requirements.txt /tmp/requirements.txt
+    apptainer/requirements.txt requirements.txt
 
 %post
     set -e
@@ -22,10 +22,9 @@ From: dockerhub-mirror3.rrze.uni-erlangen.de/pytorch/pytorch:latest
         git build-essential python3-dev ninja-build
 
     python -m pip install --upgrade pip wheel
-    python -m pip install -r /tmp/requirements.txt
-    python -m pip install --no-build-isolation --only-binary=:all: flash-attn
+    python -m pip install -r requirements.txt
 
-    rm -f /tmp/requirements.txt
+    rm -f requirements.txt
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
 %runscript

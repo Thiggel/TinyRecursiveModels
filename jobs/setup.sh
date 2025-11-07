@@ -57,6 +57,7 @@ apptainer exec --nv --cleanenv \
   --pwd "${REPO_DIR}" \
   --env-file hpcvault.env \
   --env PYTHONNOUSERSITE=1 \
+  --env http_proxy="http://proxy:80" --env https_proxy="http://proxy:80" \
   --env PYTHONPATH= \
   --env DATA_ROOT="${DATA_ROOT}" \
   --env ARC_INPUT_PREFIX="${ARC_INPUT_PREFIX}" \

@@ -1,4 +1,4 @@
-torch
+torch==2.8
 adam-atan2
 einops
 tqdm
@@ -18,3 +18,4 @@ pydantic-core
 huggingface_hub 
 numba
 triton
+flash_attn @ https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.8cxx11abiFALSE-cp310-cp310-linux_x86_64.whl

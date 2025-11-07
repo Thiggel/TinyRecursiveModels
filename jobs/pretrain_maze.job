@@ -24,6 +24,8 @@ DATA_DIR="${HPCVAULT}/${REPO_NAME}/data/maze-30x30-hard-1k"
 CHECKPOINT_DIR="${HPCVAULT}/${REPO_NAME}/checkpoints/${RUN_NAME}"
 HYDRA_DIR="${HPCVAULT}/${REPO_NAME}/hydra/${RUN_NAME}/${SLURM_JOB_ID:-manual}"
 
+. $HOME/venvs/torch/bin/activate
+
 if [[ ! -f "${SIF_PATH}" ]]; then
   echo "[maze] Missing Apptainer image at ${SIF_PATH}. Run jobs/setup.sh first." >&2
   exit 1
@@ -38,7 +40,9 @@ mkdir -p "${HPCVAULT}/${REPO_NAME}/job_logs" "${CHECKPOINT_DIR}" "${HYDRA_DIR}"
 
 cd "${REPO_DIR}"
 
-apptainer exec --nv --cleanenv \
+apptainer exec "${SIF_PATH}" pip uninstall adam-atan2 && pip install --verbose --no-cache-dir adam-atan2
+
+apptainer exec --nv  \
   --bind "${HPCVAULT}:${HPCVAULT}","${REPO_DIR}:${REPO_DIR}" \
   --pwd "${REPO_DIR}" \
   --env-file hpcvault.env \
