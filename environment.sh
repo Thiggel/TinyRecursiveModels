@@ -38,13 +38,33 @@ export WANDB_DIR="$BASE_CACHE_DIR/wandb"
 # but you can use this in your Python code
 export PYTORCH_LIGHTNING_HOME="$BASE_CACHE_DIR/lightning_logs"
 
+export PYTHONUSERBASE="$BASE_CACHE_DIR/python"
+export PIP_CACHE_DIR="$BASE_CACHE_DIR/pip-cache"
+export PIP_DISABLE_PIP_VERSION_CHECK=1
+
 export CUBLAS_WORKSPACE_CONFIG=:4096:8
 export FLASH_ATTENTION_DETERMINISTIC=0
 
-if [[ ! -d .venv ]] || [[ "${FORCE_VENV_REFRESH:-0}" == "1" ]]; then
-  ./scripts/setup_venv.sh
+OVERLAY_DIR="${SCRATCH_LOCAL}/${REPO_NAME}/overlays"
+OVERLAY_PATH="${OVERLAY_DIR}/python-overlay.ext3"
+OVERLAY_SIZE_MB="${OVERLAY_SIZE_MB:-16384}"
+
+mkdir -p "${OVERLAY_DIR}"
+
+if command -v apptainer >/dev/null 2>&1; then
+  if [[ ! -f "${OVERLAY_PATH}" ]] || [[ "${FORCE_OVERLAY_REFRESH:-0}" == "1" ]]; then
+    if [[ "${FORCE_OVERLAY_REFRESH:-0}" == "1" ]] && [[ -f "${OVERLAY_PATH}" ]]; then
+      rm -f "${OVERLAY_PATH}"
+    fi
+    echo "[environment] Creating Apptainer overlay at ${OVERLAY_PATH}" >&2
+    apptainer overlay create --size "${OVERLAY_SIZE_MB}" "${OVERLAY_PATH}"
+  else
+    echo "[environment] Using existing Apptainer overlay at ${OVERLAY_PATH}" >&2
+  fi
+else
+  echo "[environment] Apptainer not found on PATH; skipping overlay creation." >&2
 fi
 
-source .venv/bin/activate
+export TRM_OVERLAY_PATH="${OVERLAY_PATH}"
 
 rm -rf "/home/vault/c107fa/c107fa12/TinyRecursiveModels/stored_tokens"

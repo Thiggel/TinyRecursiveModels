@@ -24,14 +24,14 @@ Tiny Recursion Model (TRM) recursively improves its predicted answer y with a ti
 - Cuda 12.6.0 (or similar)
 
 ```bash
-# create the virtual environment and install all dependencies
-./scripts/setup_venv.sh
-
-# activate the environment in your shell session
-source .venv/bin/activate
+# install all dependencies directly
+python -m pip install --upgrade pip wheel setuptools
+python -m pip install -r requirements.txt
 
 wandb login YOUR-LOGIN # login if you want the logger to sync results to your Weights & Biases (https://wandb.ai/)
 ```
+
+For HPC workflows we build and run inside an Apptainer image with a writable overlay stored at `${HPCVAULT}/TinyRecursiveModels/overlays/python-overlay.ext3`. Run `bash jobs/setup.sh` to build the container, create the overlay (if needed), install the Python dependencies into `${HPCVAULT}/TinyRecursiveModels/python` via `python -m pip`, and prepare the datasets inside the containerized environment. When adding new packages inside the container, always invoke `python -m pip install --user ...` so that the packages land in the same interpreter environment that `torchrun` will use.
 
 ### Dataset Preparation
 
