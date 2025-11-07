@@ -41,6 +41,10 @@ export PYTORCH_LIGHTNING_HOME="$BASE_CACHE_DIR/lightning_logs"
 export CUBLAS_WORKSPACE_CONFIG=:4096:8
 export FLASH_ATTENTION_DETERMINISTIC=0
 
+if [[ ! -d .venv ]] || [[ "${FORCE_VENV_REFRESH:-0}" == "1" ]]; then
+  ./scripts/setup_venv.sh
+fi
+
 source .venv/bin/activate
 
 rm -rf "/home/vault/c107fa/c107fa12/TinyRecursiveModels/stored_tokens"
