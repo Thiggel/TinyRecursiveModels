@@ -39,7 +39,6 @@ export WANDB_DIR="$BASE_CACHE_DIR/wandb"
 export PYTORCH_LIGHTNING_HOME="$BASE_CACHE_DIR/lightning_logs"
 
 export PYTHONUSERBASE="$BASE_CACHE_DIR/python"
-export PYTHONPATH="${PYTHONUSERBASE}/lib/python3.10/site-packages${PYTHONPATH:+:${PYTHONPATH}}"
 export PIP_CACHE_DIR="$BASE_CACHE_DIR/pip-cache"
 export PIP_DISABLE_PIP_VERSION_CHECK=1
 

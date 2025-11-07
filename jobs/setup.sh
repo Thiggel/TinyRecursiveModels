@@ -70,7 +70,7 @@ fi
 
 ARC_INPUT_PREFIX="${REPO_DIR}/kaggle/combined/arc-agi"
 
-COMMON_APPTAINER_ARGS=(
+COMMON_APPTAINER_ARGS_BASE=(
   --cleanenv
   --bind "${HPCVAULT}:${HPCVAULT}","${REPO_DIR}:${REPO_DIR}"
   --overlay "${OVERLAY_PATH}"
@@ -79,15 +79,25 @@ COMMON_APPTAINER_ARGS=(
   --env http_proxy=http://proxy:80
   --env https_proxy=http://proxy:80
   --env PYTHONUSERBASE="${PYTHON_USER_BASE}"
-  --env PYTHONPATH="${PYTHON_USER_BASE}/lib/python3.10/site-packages"
   --env PIP_CACHE_DIR="${PIP_CACHE_DIR}"
   --env PIP_DISABLE_PIP_VERSION_CHECK=1
 )
+
+PYTHON_USER_SITE=$(apptainer exec "${COMMON_APPTAINER_ARGS_BASE[@]}" "${SIF_PATH}" \
+  python -c 'import site, sys; sys.stdout.write(site.getusersitepackages())')
+
+if [[ -z "${PYTHON_USER_SITE}" ]]; then
+  echo "[setup] Failed to resolve python user site directory" >&2
+  exit 1
+fi
+
+COMMON_APPTAINER_ARGS=("${COMMON_APPTAINER_ARGS_BASE[@]}" --env "PYTHONPATH=${PYTHON_USER_SITE}")
 
 PIP_EXEC=(apptainer exec "${COMMON_APPTAINER_ARGS[@]}" "${SIF_PATH}")
 
 "${PIP_EXEC[@]}" python -m pip install --user --upgrade pip wheel setuptools
 "${PIP_EXEC[@]}" python -m pip install --user -r requirements.txt
+"${PIP_EXEC[@]}" python -c "import adam_atan2_pytorch" >/dev/null
 
 apptainer exec --nv "${COMMON_APPTAINER_ARGS[@]}" \
   --env DATA_ROOT="${DATA_ROOT}" \
