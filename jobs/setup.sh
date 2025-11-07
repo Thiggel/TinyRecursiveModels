@@ -24,6 +24,10 @@ mkdir -p "${SIF_DIR}" "${DATA_ROOT}" "${HPCVAULT}/${REPO_NAME}/job_logs" \
 
 cd "${REPO_DIR}"
 
+if [[ ! -d "${REPO_DIR}/.venv" ]] || [[ "${FORCE_VENV_REFRESH:-0}" == "1" ]]; then
+  bash "${REPO_DIR}/scripts/setup_venv.sh"
+fi
+
 FORCE_REBUILD=0
 if [[ "${1:-}" == "--force-build" ]]; then
   FORCE_REBUILD=1
