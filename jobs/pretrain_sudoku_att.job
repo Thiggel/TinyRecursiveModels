@@ -1,0 +1,62 @@
+#!/bin/bash -l
+
+#SBATCH --job-name=sudoku-att
+#SBATCH --output=${HPCVAULT}/${REPO_NAME}/job_logs/sudoku-att_%A.out
+#SBATCH --error=${HPCVAULT}/${REPO_NAME}/job_logs/sudoku-att_%A.err
+#SBATCH --partition=a100
+#SBATCH --gres=gpu:a100:1 -C a100_80
+#SBATCH --time=36:00:00
+#SBATCH --nodes=1
+
+set -euo pipefail
+
+unset SLURM_EXPORT_ENV
+: "${HPCVAULT:?Set HPCVAULT to the base persistent storage directory}"
+
+REPO_NAME=TinyRecursiveModels
+REPO_DIR="${HOME}/${REPO_NAME}"
+SIF_PATH="${HPCVAULT}/${REPO_NAME}/containers/pytorch.sif"
+
+RUN_NAME="pretrain_att_sudoku_a100x1"
+PROJECT_NAME="Sudoku-ACT-torch"
+
+DATA_DIR="${HPCVAULT}/${REPO_NAME}/data/sudoku-extreme-1k-aug-1000"
+CHECKPOINT_DIR="${HPCVAULT}/${REPO_NAME}/checkpoints/${RUN_NAME}"
+HYDRA_DIR="${HPCVAULT}/${REPO_NAME}/hydra/${RUN_NAME}/${SLURM_JOB_ID:-manual}"
+
+if [[ ! -f "${SIF_PATH}" ]]; then
+  echo "[sudoku-att] Missing Apptainer image at ${SIF_PATH}. Run jobs/setup.sh first." >&2
+  exit 1
+fi
+
+if [[ ! -d "${DATA_DIR}" ]]; then
+  echo "[sudoku-att] Dataset not found at ${DATA_DIR}. Run jobs/setup.sh to prepare datasets." >&2
+  exit 1
+fi
+
+mkdir -p "${HPCVAULT}/${REPO_NAME}/job_logs" "${CHECKPOINT_DIR}" "${HYDRA_DIR}"
+
+cd "${REPO_DIR}"
+
+apptainer exec --nv --cleanenv \
+  --bind "${HPCVAULT}:${HPCVAULT}","${REPO_DIR}:${REPO_DIR}" \
+  --pwd "${REPO_DIR}" \
+  --env-file hpcvault.env \
+  --env PYTHONNOUSERSITE=1 \
+  --env PYTHONPATH= \
+  "${SIF_PATH}" bash -lc "
+    set -euo pipefail
+    python pretrain.py \
+      arch=trm \
+      data_paths=[\"${DATA_DIR}\"] \
+      evaluators=\"[]\" \
+      epochs=50000 eval_interval=5000 \
+      lr=1e-4 puzzle_emb_lr=1e-4 weight_decay=1.0 puzzle_emb_weight_decay=1.0 \
+      arch.L_layers=2 \
+      arch.H_cycles=3 arch.L_cycles=6 \
+      +run_name=${RUN_NAME} \
+      project_name=${PROJECT_NAME} \
+      checkpoint_path=\"${CHECKPOINT_DIR}\" \
+      hydra.run.dir=\"${HYDRA_DIR}\" \
+      ema=True
+  "

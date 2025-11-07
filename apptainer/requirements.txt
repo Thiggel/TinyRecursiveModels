@@ -1,0 +1,14 @@
+adam-atan2
+argdantic
+coolname
+einops
+hydra-core
+huggingface_hub
+numpy
+omegaconf
+packaging
+pydantic
+tqdm
+wandb
+numba
+triton
