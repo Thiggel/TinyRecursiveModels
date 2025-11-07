@@ -72,10 +72,6 @@ fi
 
 PIP_EXEC=(apptainer exec "${COMMON_APPTAINER_ARGS[@]}" "${SIF_PATH}")
 
-"${PIP_EXEC[@]}" python -m pip uninstall -y adam-atan2 >/dev/null 2>&1 || true
-"${PIP_EXEC[@]}" python -m pip install --user --no-cache-dir --no-build-isolation adam-atan2
-"${PIP_EXEC[@]}" python -c "import adam_atan2_pytorch" >/dev/null
-
 apptainer exec --nv "${COMMON_APPTAINER_ARGS[@]}" \
   "${SIF_PATH}" bash -lc "
     set -euo pipefail
