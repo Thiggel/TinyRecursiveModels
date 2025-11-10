@@ -1,18 +1,39 @@
 #!/bin/bash -l
 set -euo pipefail
 
-: "${HPCVAULT:?Set HPCVAULT to the base persistent storage directory}"
+: "${WORK:?Set WORK to the base work directory}"
+: "${SCRATCH:?Set SCRATCH to the base scratch directory}"
 
 REPO_NAME=TinyRecursiveModels
 REPO_DIR="${HOME}/${REPO_NAME}"
-SIF_DIR="${HPCVAULT}/${REPO_NAME}/containers"
+WORK_ROOT="${WORK}/${REPO_NAME}"
+SCRATCH_ROOT="${SCRATCH}/${REPO_NAME}"
+
+SIF_DIR="${WORK_ROOT}/containers"
 SIF_PATH="${SIF_DIR}/pytorch.sif"
-DATA_ROOT="${HPCVAULT}/${REPO_NAME}/data"
-OVERLAY_DIR="${HPCVAULT}/${REPO_NAME}/overlays"
+DATA_ROOT="${WORK_ROOT}/data"
+OVERLAY_DIR="${WORK_ROOT}/overlays"
 OVERLAY_PATH="${OVERLAY_DIR}/python-overlay.ext3"
 OVERLAY_SIZE_MB="${OVERLAY_SIZE_MB:-16384}"
-PYTHON_USER_BASE="${HPCVAULT}/${REPO_NAME}/python"
-PIP_CACHE_DIR="${HPCVAULT}/${REPO_NAME}/pip-cache"
+PYTHON_USER_BASE="${WORK_ROOT}/python"
+
+BASE_CACHE_DIR="${SCRATCH_ROOT}"
+HF_HOME="${BASE_CACHE_DIR}/hf"
+HF_DATASETS_CACHE="${BASE_CACHE_DIR}/datasets"
+HF_MODULES_CACHE="${BASE_CACHE_DIR}/modules"
+TRANSFORMERS_CACHE="${BASE_CACHE_DIR}/transformers"
+DEEPSPEED_CACHE_DIR="${BASE_CACHE_DIR}/deepspeed"
+TRITON_CACHE_DIR="${BASE_CACHE_DIR}/triton"
+WANDB_DIR="${BASE_CACHE_DIR}/wandb"
+TORCH_HOME="${BASE_CACHE_DIR}/torch"
+XDG_CACHE_HOME="${BASE_CACHE_DIR}/.cache"
+PYTORCH_LIGHTNING_HOME="${BASE_CACHE_DIR}/lightning_logs"
+HYDRA_BASE_DIR="${WORK_ROOT}/hydra"
+CHECKPOINT_ROOT="${WORK_ROOT}/checkpoints"
+JOB_LOG_DIR="${WORK_ROOT}/job_logs"
+TRM_OVERLAY_PATH="${OVERLAY_PATH}"
+PIP_CACHE_DIR="${BASE_CACHE_DIR}/pip-cache"
+TMPDIR="${SLURM_TMPDIR:-${BASE_CACHE_DIR}/.tmp}"
 
 if [[ ! -d "${REPO_DIR}" ]]; then
   echo "[setup] Expected repository checkout at ${REPO_DIR}" >&2
@@ -25,9 +46,16 @@ if ! command -v apptainer >/dev/null 2>&1; then
 fi
 
 mkdir -p "${SIF_DIR}" "${DATA_ROOT}" "${OVERLAY_DIR}" \
-         "${HPCVAULT}/${REPO_NAME}/job_logs" \
-         "${HPCVAULT}/${REPO_NAME}/checkpoints" "${HPCVAULT}/${REPO_NAME}/hydra" \
-         "${PYTHON_USER_BASE}" "${PIP_CACHE_DIR}"
+         "${JOB_LOG_DIR}" "${CHECKPOINT_ROOT}" "${HYDRA_BASE_DIR}" \
+         "${PYTHON_USER_BASE}" "${PIP_CACHE_DIR}" "${HF_HOME}" \
+         "${HF_DATASETS_CACHE}" "${HF_MODULES_CACHE}" "${TRANSFORMERS_CACHE}" \
+         "${DEEPSPEED_CACHE_DIR}" "${TRITON_CACHE_DIR}" \
+         "${WANDB_DIR}" "${TORCH_HOME}" "${XDG_CACHE_HOME}" \
+         "${PYTORCH_LIGHTNING_HOME}"
+
+if [[ -z "${SLURM_TMPDIR:-}" ]]; then
+  mkdir -p "${TMPDIR}"
+fi
 
 cd "${REPO_DIR}"
 
@@ -72,15 +100,35 @@ ARC_INPUT_PREFIX="${REPO_DIR}/kaggle/combined/arc-agi"
 
 COMMON_APPTAINER_ARGS_BASE=(
   --cleanenv
-  --bind "${HPCVAULT}:${HPCVAULT}","${REPO_DIR}:${REPO_DIR}"
+  --bind "${WORK}:${WORK}"
+  --bind "${SCRATCH}:${SCRATCH}"
+  --bind "${REPO_DIR}:${REPO_DIR}"
   --overlay "${OVERLAY_PATH}"
   --pwd "${REPO_DIR}"
-  --env-file hpcvault.env
   --env http_proxy=http://proxy:80
   --env https_proxy=http://proxy:80
   --env PYTHONUSERBASE="${PYTHON_USER_BASE}"
   --env PIP_CACHE_DIR="${PIP_CACHE_DIR}"
   --env PIP_DISABLE_PIP_VERSION_CHECK=1
+  --env BASE_CACHE_DIR="${BASE_CACHE_DIR}"
+  --env HF_HOME="${HF_HOME}"
+  --env HF_DATASETS_CACHE="${HF_DATASETS_CACHE}"
+  --env HF_MODULES_CACHE="${HF_MODULES_CACHE}"
+  --env TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE}"
+  --env DEEPSPEED_CACHE_DIR="${DEEPSPEED_CACHE_DIR}"
+  --env TRITON_CACHE_DIR="${TRITON_CACHE_DIR}"
+  --env WANDB_DIR="${WANDB_DIR}"
+  --env TORCH_HOME="${TORCH_HOME}"
+  --env XDG_CACHE_HOME="${XDG_CACHE_HOME}"
+  --env PYTORCH_LIGHTNING_HOME="${PYTORCH_LIGHTNING_HOME}"
+  --env HYDRA_BASE_DIR="${HYDRA_BASE_DIR}"
+  --env CHECKPOINT_ROOT="${CHECKPOINT_ROOT}"
+  --env JOB_LOG_DIR="${JOB_LOG_DIR}"
+  --env DATA_ROOT="${DATA_ROOT}"
+  --env TRM_OVERLAY_PATH="${TRM_OVERLAY_PATH}"
+  --env CUBLAS_WORKSPACE_CONFIG=:4096:8
+  --env FLASH_ATTENTION_DETERMINISTIC=0
+  --env TMPDIR="${TMPDIR}"
 )
 
 PYTHON_USER_SITE=$(apptainer exec "${COMMON_APPTAINER_ARGS_BASE[@]}" "${SIF_PATH}" \
