@@ -1,4 +1,4 @@
-from typing import Tuple, List, Dict, Optional
+from typing import Tuple, Dict, Optional
 from dataclasses import dataclass
 import math
 import torch
@@ -8,8 +8,9 @@ from torch import nn
 from pydantic import BaseModel
 import random
 from models.common import trunc_normal_init_
-from models.layers import rms_norm, LinearSwish, SwiGLU, Attention, RotaryEmbedding, CosSin, CastedEmbedding, CastedLinear
+from models.layers import rms_norm, SwiGLU, Attention, RotaryEmbedding, CosSin, CastedEmbedding, CastedLinear
 from models.sparse_embedding import CastedSparseEmbedding
+from models.recursive_reasoning.depth_recurrence import DepthRecurrentBlock, DepthRecurrentConfig
 
 IGNORE_LABEL_ID = -100
 
@@ -61,6 +62,20 @@ class TinyRecursiveReasoningModel_ACTV1Config(BaseModel):
     mlp_t: bool = False # use mlp on L instead of transformer
     puzzle_emb_len: int = 16 # if non-zero, its specified to this value
     no_ACT_continue: bool =  True # No continue ACT loss, only use the sigmoid of the halt which makes much more sense
+    depth_recurrence: str = "transformer"
+    depth_recurrence_steps: Optional[int] = None
+    depth_cell_hidden_size: Optional[int] = None
+    depth_cell_state_size: int = 64
+    depth_cell_expand: int = 1
+    depth_cell_conv_kernel: int = 4
+    depth_cell_layers: int = 1
+    depth_cell_nonlinearity: str = "tanh"
+    depth_cell_xlstm_variant: str = "slstm"
+    depth_cell_xlstm_chunkwise_kernel: str = "chunkwise--native_autograd"
+    depth_cell_xlstm_sequence_kernel: str = "native_sequence__native"
+    depth_cell_xlstm_step_kernel: str = "native"
+    depth_cell_xlstm_num_heads: Optional[int] = None
+    depth_cell_mamba_impl: str = "mamba2"
 
 class TinyRecursiveReasoningModel_ACTV1Block(nn.Module):
     def __init__(self, config: TinyRecursiveReasoningModel_ACTV1Config) -> None:
@@ -104,15 +119,52 @@ class TinyRecursiveReasoningModel_ACTV1Block(nn.Module):
         return hidden_states
 
 class TinyRecursiveReasoningModel_ACTV1ReasoningModule(nn.Module):
-    def __init__(self, layers: List[TinyRecursiveReasoningModel_ACTV1Block]):
+    def __init__(self, config: TinyRecursiveReasoningModel_ACTV1Config):
         super().__init__()
-        self.layers = torch.nn.ModuleList(layers)
+        self.config = config
+        recurrence = config.depth_recurrence.lower()
+        if recurrence == "transformer":
+            self.mode = "transformer"
+            self.layers = torch.nn.ModuleList(
+                [TinyRecursiveReasoningModel_ACTV1Block(config) for _ in range(config.L_layers)]
+            )
+            self.depth_block = None
+        else:
+            self.mode = "recurrent"
+            depth_steps = config.depth_recurrence_steps or config.L_layers
+            recurrent_config = DepthRecurrentConfig(
+                hidden_size=config.hidden_size,
+                num_heads=config.num_heads,
+                expansion=config.expansion,
+                rms_norm_eps=config.rms_norm_eps,
+                depth_steps=max(1, depth_steps),
+                cell_type=recurrence,
+                cell_hidden_size=config.depth_cell_hidden_size,
+                cell_state_size=config.depth_cell_state_size,
+                cell_expand=config.depth_cell_expand,
+                cell_conv_kernel=config.depth_cell_conv_kernel,
+                cell_layers=config.depth_cell_layers,
+                cell_nonlinearity=config.depth_cell_nonlinearity,
+                xlstm_variant=config.depth_cell_xlstm_variant,
+                xlstm_chunkwise_kernel=config.depth_cell_xlstm_chunkwise_kernel,
+                xlstm_sequence_kernel=config.depth_cell_xlstm_sequence_kernel,
+                xlstm_step_kernel=config.depth_cell_xlstm_step_kernel,
+                xlstm_num_heads=config.depth_cell_xlstm_num_heads,
+                mamba_impl=config.depth_cell_mamba_impl,
+            )
+            self.layers = None
+            self.depth_block = DepthRecurrentBlock(recurrent_config)
 
     def forward(self, hidden_states: torch.Tensor, input_injection: torch.Tensor, **kwargs) -> torch.Tensor:
         hidden_states = hidden_states + input_injection
-        for layer in self.layers:
-            hidden_states = layer(hidden_states=hidden_states, **kwargs)
-        return hidden_states
+        if self.mode == "transformer":
+            assert self.layers is not None
+            for layer in self.layers:
+                hidden_states = layer(hidden_states=hidden_states, **kwargs)
+            return hidden_states
+        assert self.depth_block is not None
+        cos_sin = kwargs.get("cos_sin")
+        return self.depth_block(hidden_states=hidden_states, cos_sin=cos_sin)
 
 
 class TinyRecursiveReasoningModel_ACTV1_Inner(nn.Module):
@@ -147,7 +199,7 @@ class TinyRecursiveReasoningModel_ACTV1_Inner(nn.Module):
             pass
 
         # Reasoning Layers
-        self.L_level = TinyRecursiveReasoningModel_ACTV1ReasoningModule(layers=[TinyRecursiveReasoningModel_ACTV1Block(self.config) for _i in range(self.config.L_layers)])
+        self.L_level = TinyRecursiveReasoningModel_ACTV1ReasoningModule(self.config)
 
         # Initial states
         self.H_init = nn.Buffer(trunc_normal_init_(torch.empty(self.config.hidden_size, dtype=self.forward_dtype), std=1), persistent=True)
