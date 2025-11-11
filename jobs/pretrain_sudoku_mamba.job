@@ -101,8 +101,8 @@ apptainer exec --nv --cleanenv \
   --env TMPDIR="${TMPDIR}" \
   "${SIF_PATH}" bash -lc "
     set -euo pipefail
-    pip install --user -r requirements.txt
-    python pretrain.py \
+    python3.10 -m pip install --user -r requirements.txt
+    python3.10 pretrain.py \
       arch=trm \
       data_paths=[\"${DATA_DIR}\"] \
       evaluators=\"[]\" \
