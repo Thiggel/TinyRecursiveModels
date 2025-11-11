@@ -151,7 +151,16 @@ def _sequential_outputs(
 @pytest.mark.parametrize(
     "cell_cls, kwargs",
     [
-        (XLSTMDepthCell, dict(num_layers=2, variant="slstm", chunkwise_kernel="chunkwise--native_autograd", sequence_kernel="native_sequence__native", step_kernel="native", num_heads=1)),
+        (
+            XLSTMDepthCell,
+            dict(
+                num_layers=2,
+                chunkwise_kernel="chunkwise--native_autograd",
+                sequence_kernel="native_sequence__native",
+                step_kernel="native",
+                num_heads=1,
+            ),
+        ),
         (MambaDepthCell, dict(state_size=8, expand=1, conv_kernel=2, num_layers=2, implementation="pytorch")),
     ],
 )
@@ -174,6 +183,9 @@ def test_transformer_backed_cells_match_full_sequence(cell_cls, kwargs) -> None:
 
     torch.testing.assert_close(sequential, reference)
 
-    cache_position = state[1]
-    expected = torch.full_like(cache_position, steps)
-    torch.testing.assert_close(cache_position, expected)
+    if isinstance(state, tuple) and len(state) == 2 and isinstance(state[1], torch.Tensor):
+        cache_position = state[1]
+        expected = torch.full_like(cache_position, steps)
+        torch.testing.assert_close(cache_position, expected)
+    elif hasattr(state, "seqlen_offset"):
+        assert state.seqlen_offset == steps

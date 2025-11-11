@@ -6,9 +6,9 @@ from typing import Optional, Tuple, Sequence
 import torch
 from torch import nn
 
-from transformers import MambaConfig, MambaModel, XlstmConfig, XlstmModel
+from transformers import MambaConfig, MambaModel, xLSTMConfig, xLSTMModel
 from transformers.models.mamba.modeling_mamba import MambaCache
-from transformers.models.xlstm.modeling_xlstm import XlstmCache
+from transformers.models.xlstm.modeling_xlstm import xLSTMCache
 
 from models.layers import Attention, rms_norm
 
@@ -27,7 +27,6 @@ class DepthRecurrentConfig:
     cell_conv_kernel: int = 4
     cell_layers: int = 1
     cell_nonlinearity: str = "tanh"
-    xlstm_variant: str = "slstm"
     xlstm_chunkwise_kernel: str = "chunkwise--native_autograd"
     xlstm_sequence_kernel: str = "native_sequence__native"
     xlstm_step_kernel: str = "native"
@@ -187,7 +186,6 @@ class XLSTMDepthCell(DepthRecurrentCell):
         input_size: int,
         *,
         num_layers: int,
-        variant: str,
         chunkwise_kernel: str,
         sequence_kernel: str,
         step_kernel: str,
@@ -199,7 +197,7 @@ class XLSTMDepthCell(DepthRecurrentCell):
 
         heads = num_heads if num_heads is not None else 1
 
-        self.config = XlstmConfig(
+        self.config = xLSTMConfig(
             hidden_size=input_size,
             num_hidden_layers=num_layers,
             num_heads=heads,
@@ -208,10 +206,9 @@ class XLSTMDepthCell(DepthRecurrentCell):
             step_kernel=step_kernel,
             mode="inference",
             return_last_states=True,
-            variant=variant,
         )
-        self.model = XlstmModel(self.config)
-        self.cache_class = XlstmCache
+        self.model = xLSTMModel(self.config)
+        self.cache_class = xLSTMCache
 
     def init_state(self, batch: int, positions: int, *, device: torch.device, dtype: torch.dtype):
         max_batch = batch * positions
@@ -221,22 +218,22 @@ class XLSTMDepthCell(DepthRecurrentCell):
             dtype=dtype,
             device=device,
         )
-        cache_position = torch.zeros(max_batch, dtype=torch.long, device=device)
-        return cache, cache_position
+        cache.reset()
+        cache.seqlen_offset = 0
+        return cache
 
     def forward(self, u: torch.Tensor, h: torch.Tensor, state):
-        cache, cache_position = state
+        cache = state
         batch, positions, hidden = u.shape
         inputs_embeds = u.view(batch * positions, 1, hidden)
         outputs = self.model(
             inputs_embeds=inputs_embeds,
             cache_params=cache,
-            cache_position=cache_position,
             use_cache=True,
         )
         updated_cache = outputs.cache_params
         next_hidden = outputs.last_hidden_state.view(batch, positions, hidden)
-        return next_hidden, (updated_cache, cache_position + 1)
+        return next_hidden, updated_cache
 
 
 class MambaDepthCell(DepthRecurrentCell):
@@ -332,7 +329,6 @@ class DepthRecurrentBlock(nn.Module):
             self.cell = XLSTMDepthCell(
                 config.hidden_size,
                 num_layers=max(1, config.cell_layers),
-                variant=config.xlstm_variant,
                 chunkwise_kernel=config.xlstm_chunkwise_kernel,
                 sequence_kernel=config.xlstm_sequence_kernel,
                 step_kernel=config.xlstm_step_kernel,

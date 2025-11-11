@@ -32,7 +32,6 @@ depth_cell_expand: 1
 depth_cell_conv_kernel: 4
 depth_cell_layers: 1
 depth_cell_nonlinearity: tanh
-depth_cell_xlstm_variant: slstm
 depth_cell_xlstm_chunkwise_kernel: chunkwise--native_autograd
 depth_cell_xlstm_sequence_kernel: native_sequence__native
 depth_cell_xlstm_step_kernel: native

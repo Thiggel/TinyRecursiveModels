@@ -42,9 +42,6 @@ def build_config(**overrides):
             "xlstm",
             {
                 "depth_cell_layers": 2,
-                "depth_cell_xlstm_chunkwise_kernel": "chunkwise--native_autograd",
-                "depth_cell_xlstm_sequence_kernel": "native_sequence__native",
-                "depth_cell_xlstm_step_kernel": "native",
                 "depth_cell_xlstm_num_heads": 2,
             },
         ),

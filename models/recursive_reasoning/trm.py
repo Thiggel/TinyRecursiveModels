@@ -70,7 +70,6 @@ class TinyRecursiveReasoningModel_ACTV1Config(BaseModel):
     depth_cell_conv_kernel: int = 4
     depth_cell_layers: int = 1
     depth_cell_nonlinearity: str = "tanh"
-    depth_cell_xlstm_variant: str = "slstm"
     depth_cell_xlstm_chunkwise_kernel: str = "chunkwise--native_autograd"
     depth_cell_xlstm_sequence_kernel: str = "native_sequence__native"
     depth_cell_xlstm_step_kernel: str = "native"
@@ -145,7 +144,6 @@ class TinyRecursiveReasoningModel_ACTV1ReasoningModule(nn.Module):
                 cell_conv_kernel=config.depth_cell_conv_kernel,
                 cell_layers=config.depth_cell_layers,
                 cell_nonlinearity=config.depth_cell_nonlinearity,
-                xlstm_variant=config.depth_cell_xlstm_variant,
                 xlstm_chunkwise_kernel=config.depth_cell_xlstm_chunkwise_kernel,
                 xlstm_sequence_kernel=config.depth_cell_xlstm_sequence_kernel,
                 xlstm_step_kernel=config.depth_cell_xlstm_step_kernel,
