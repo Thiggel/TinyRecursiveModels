@@ -71,6 +71,7 @@ def test_rnn_depth_cell_matches_pytorch_rnn(nonlinearity: str) -> None:
         h, state = cell(inputs[t], h, state)
         outputs.append(h)
     stacked = torch.stack(outputs).permute(1, 2, 0, 3).reshape(batch * positions, steps, hidden_size)
+    assert stacked.dtype == inputs.dtype
 
     flat_inputs = inputs.reshape(steps, batch * positions, hidden_size)
     initial_hidden = torch.zeros(reference.num_layers, batch * positions, hidden_size)
@@ -113,6 +114,7 @@ def test_lstm_depth_cell_matches_pytorch_lstm() -> None:
         h, state = cell(inputs[t], h, state)
         outputs.append(h)
     stacked = torch.stack(outputs).permute(1, 2, 0, 3).reshape(batch * positions, steps, hidden_size)
+    assert stacked.dtype == inputs.dtype
 
     flat_inputs = inputs.reshape(steps, batch * positions, hidden_size)
     initial_hidden = torch.zeros(reference.num_layers, batch * positions, hidden_size)
@@ -176,6 +178,7 @@ def test_transformer_backed_cells_match_full_sequence(cell_cls, kwargs) -> None:
         cell.model.eval()
     sequential, state = _sequential_outputs(cell, inputs, initial_hidden, batch, positions)
     sequential = sequential.permute(1, 2, 0, 3).reshape(batch * positions, steps, hidden_size)
+    assert sequential.dtype == inputs.dtype
 
     model = cell.model
     flat_inputs = inputs.permute(1, 2, 0, 3).reshape(batch * positions, steps, hidden_size)

@@ -83,12 +83,14 @@ class RNNDepthCell(DepthRecurrentCell):
     def forward(self, u: torch.Tensor, h: torch.Tensor, state: Tuple[Optional[torch.Tensor], Sequence[Optional[torch.Tensor]]]):
         first_prev, extra_prev = state
         batch, positions, _ = u.shape
-        flat_u = u.reshape(batch * positions, -1)
+        orig_dtype = u.dtype
+        compute_dtype = self.first_layer.weight_ih.dtype
+        flat_u = u.reshape(batch * positions, -1).to(compute_dtype)
 
         if first_prev is None:
-            flat_h_prev = h.reshape(batch * positions, -1)
+            flat_h_prev = h.reshape(batch * positions, -1).to(compute_dtype)
         else:
-            flat_h_prev = first_prev.reshape(batch * positions, -1)
+            flat_h_prev = first_prev.reshape(batch * positions, -1).to(compute_dtype)
 
         updated_flat = self.first_layer(flat_u, flat_h_prev)
         next_first = updated_flat.view(batch, positions, self.hidden_size)
@@ -98,14 +100,23 @@ class RNNDepthCell(DepthRecurrentCell):
         for idx, layer in enumerate(self.additional_layers):
             prev_state = extra_prev[idx] if idx < len(extra_prev) else None
             if prev_state is None:
-                prev_flat = torch.zeros_like(layer_inputs)
+                prev_flat = torch.zeros(
+                    batch * positions,
+                    self.hidden_size,
+                    device=layer_inputs.device,
+                    dtype=compute_dtype,
+                )
             else:
-                prev_flat = prev_state.reshape(batch * positions, -1)
+                prev_flat = prev_state.reshape(batch * positions, -1).to(compute_dtype)
             layer_outputs = layer(layer_inputs, prev_flat)
             new_states.append(layer_outputs.view(batch, positions, self.hidden_size))
             layer_inputs = layer_outputs
 
-        return layer_inputs.view(batch, positions, self.hidden_size), (next_first, tuple(new_states))
+        next_hidden = layer_inputs.view(batch, positions, self.hidden_size)
+        return next_hidden.to(orig_dtype), (
+            next_first.to(compute_dtype),
+            tuple(state_tensor.to(compute_dtype) for state_tensor in new_states),
+        )
 
 
 class LSTMDepthCell(DepthRecurrentCell):
@@ -123,7 +134,8 @@ class LSTMDepthCell(DepthRecurrentCell):
         self.hidden_size = hidden_size
 
     def init_state(self, batch: int, positions: int, *, device: torch.device, dtype: torch.dtype):
-        zeros = torch.zeros(batch, positions, self.hidden_size, device=device, dtype=dtype)
+        compute_dtype = self.first_layer.weight_ih.dtype
+        zeros = torch.zeros(batch, positions, self.hidden_size, device=device, dtype=compute_dtype)
         additional = tuple(
             (None, None) for _ in range(len(self.additional_layers))
         )
@@ -138,12 +150,14 @@ class LSTMDepthCell(DepthRecurrentCell):
         h_prev, c_prev, extra_prev = state
         batch, positions, _ = u.shape
 
-        flat_u = u.reshape(batch * positions, -1)
+        orig_dtype = u.dtype
+        compute_dtype = self.first_layer.weight_ih.dtype
+        flat_u = u.reshape(batch * positions, -1).to(compute_dtype)
         if h_prev is None:
-            flat_h_prev = h.reshape(batch * positions, -1)
+            flat_h_prev = h.reshape(batch * positions, -1).to(compute_dtype)
         else:
-            flat_h_prev = h_prev.reshape(batch * positions, -1)
-        flat_c_prev = c_prev.reshape(batch * positions, -1)
+            flat_h_prev = h_prev.reshape(batch * positions, -1).to(compute_dtype)
+        flat_c_prev = c_prev.reshape(batch * positions, -1).to(compute_dtype)
         flat_h_next, flat_c_next = self.first_layer(flat_u, (flat_h_prev, flat_c_prev))
 
         next_hidden = flat_h_next.view(batch, positions, self.hidden_size)
@@ -158,13 +172,23 @@ class LSTMDepthCell(DepthRecurrentCell):
                 prev_h = prev_c = None
 
             if prev_h is None:
-                prev_h_flat = torch.zeros_like(layer_input)
+                prev_h_flat = torch.zeros(
+                    batch * positions,
+                    self.hidden_size,
+                    device=layer_input.device,
+                    dtype=compute_dtype,
+                )
             else:
-                prev_h_flat = prev_h.reshape(batch * positions, -1)
+                prev_h_flat = prev_h.reshape(batch * positions, -1).to(compute_dtype)
             if prev_c is None:
-                prev_c_flat = torch.zeros_like(layer_input)
+                prev_c_flat = torch.zeros(
+                    batch * positions,
+                    self.hidden_size,
+                    device=layer_input.device,
+                    dtype=compute_dtype,
+                )
             else:
-                prev_c_flat = prev_c.reshape(batch * positions, -1)
+                prev_c_flat = prev_c.reshape(batch * positions, -1).to(compute_dtype)
 
             layer_h, layer_c = layer(layer_input, (prev_h_flat, prev_c_flat))
             new_extra.append(
@@ -175,7 +199,12 @@ class LSTMDepthCell(DepthRecurrentCell):
             )
             layer_input = layer_h
 
-        return layer_input.view(batch, positions, self.hidden_size), (next_hidden, next_cell, tuple(new_extra))
+        next_top = layer_input.view(batch, positions, self.hidden_size)
+        return next_top.to(orig_dtype), (
+            next_hidden.to(compute_dtype),
+            next_cell.to(compute_dtype),
+            tuple((h_state.to(compute_dtype), c_state.to(compute_dtype)) for h_state, c_state in new_extra),
+        )
 
 
 class XLSTMDepthCell(DepthRecurrentCell):
@@ -212,10 +241,11 @@ class XLSTMDepthCell(DepthRecurrentCell):
 
     def init_state(self, batch: int, positions: int, *, device: torch.device, dtype: torch.dtype):
         max_batch = batch * positions
+        compute_dtype = self.model.dtype
         cache = self.cache_class(
             config=self.model.config,
             max_batch_size=max_batch,
-            dtype=dtype,
+            dtype=compute_dtype,
             device=device,
         )
         cache.reset()
@@ -225,7 +255,9 @@ class XLSTMDepthCell(DepthRecurrentCell):
     def forward(self, u: torch.Tensor, h: torch.Tensor, state):
         cache = state
         batch, positions, hidden = u.shape
-        inputs_embeds = u.view(batch * positions, 1, hidden)
+        orig_dtype = u.dtype
+        compute_dtype = self.model.dtype
+        inputs_embeds = u.view(batch * positions, 1, hidden).to(compute_dtype)
         outputs = self.model(
             inputs_embeds=inputs_embeds,
             cache_params=cache,
@@ -233,7 +265,7 @@ class XLSTMDepthCell(DepthRecurrentCell):
         )
         updated_cache = outputs.cache_params
         next_hidden = outputs.last_hidden_state.view(batch, positions, hidden)
-        return next_hidden, updated_cache
+        return next_hidden.to(orig_dtype), updated_cache
 
 
 class MambaDepthCell(DepthRecurrentCell):
@@ -267,10 +299,11 @@ class MambaDepthCell(DepthRecurrentCell):
 
     def init_state(self, batch: int, positions: int, *, device: torch.device, dtype: torch.dtype):
         max_batch = batch * positions
+        compute_dtype = self.model.dtype
         cache = self.cache_class(
             config=self.model.config,
             max_batch_size=max_batch,
-            dtype=dtype,
+            dtype=compute_dtype,
             device=device,
         )
         cache_position = torch.zeros(max_batch, dtype=torch.long, device=device)
@@ -279,7 +312,9 @@ class MambaDepthCell(DepthRecurrentCell):
     def forward(self, u: torch.Tensor, h: torch.Tensor, state):
         cache, cache_position = state
         batch, positions, hidden = u.shape
-        inputs_embeds = u.view(batch * positions, 1, hidden)
+        orig_dtype = u.dtype
+        compute_dtype = self.model.dtype
+        inputs_embeds = u.view(batch * positions, 1, hidden).to(compute_dtype)
         outputs = self.model(
             inputs_embeds=inputs_embeds,
             cache_params=cache,
@@ -288,7 +323,7 @@ class MambaDepthCell(DepthRecurrentCell):
         )
         updated_cache = outputs.cache_params
         next_hidden = outputs.last_hidden_state.view(batch, positions, hidden)
-        return next_hidden, (updated_cache, cache_position + 1)
+        return next_hidden.to(orig_dtype), (updated_cache, cache_position + 1)
 
 
 class DepthRecurrentBlock(nn.Module):
