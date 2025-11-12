@@ -130,13 +130,14 @@ class TinyRecursiveReasoningModel_ACTV1ReasoningModule(nn.Module):
             self.depth_block = None
         else:
             self.mode = "recurrent"
-            depth_steps = config.depth_recurrence_steps or config.L_layers
+            depth_steps = config.depth_recurrence_steps or config.L_cycles
+            self.depth_steps = max(1, depth_steps)
             recurrent_config = DepthRecurrentConfig(
                 hidden_size=config.hidden_size,
                 num_heads=config.num_heads,
                 expansion=config.expansion,
                 rms_norm_eps=config.rms_norm_eps,
-                depth_steps=max(1, depth_steps),
+                depth_steps=self.depth_steps,
                 cell_type=recurrence,
                 cell_hidden_size=config.depth_cell_hidden_size,
                 cell_state_size=config.depth_cell_state_size,
@@ -152,17 +153,33 @@ class TinyRecursiveReasoningModel_ACTV1ReasoningModule(nn.Module):
             )
             self.layers = None
             self.depth_block = DepthRecurrentBlock(recurrent_config)
+        if self.mode == "transformer":
+            self.depth_steps = config.L_layers
 
-    def forward(self, hidden_states: torch.Tensor, input_injection: torch.Tensor, **kwargs) -> torch.Tensor:
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        input_injection: torch.Tensor,
+        *,
+        recurrence_state=None,
+        **kwargs,
+    ):
         hidden_states = hidden_states + input_injection
         if self.mode == "transformer":
             assert self.layers is not None
             for layer in self.layers:
                 hidden_states = layer(hidden_states=hidden_states, **kwargs)
-            return hidden_states
+            return hidden_states, None
         assert self.depth_block is not None
         cos_sin = kwargs.get("cos_sin")
-        return self.depth_block(hidden_states=hidden_states, cos_sin=cos_sin)
+        if recurrence_state is None:
+            recurrence_state = self.depth_block.init_state(hidden_states)
+        hidden_states, recurrence_state = self.depth_block(
+            hidden_states=hidden_states,
+            state=recurrence_state,
+            cos_sin=cos_sin,
+        )
+        return hidden_states, recurrence_state
 
 
 class TinyRecursiveReasoningModel_ACTV1_Inner(nn.Module):
@@ -257,13 +274,26 @@ class TinyRecursiveReasoningModel_ACTV1_Inner(nn.Module):
         # H_cycles-1 without grad
         with torch.no_grad():
             for _H_step in range(self.config.H_cycles-1):
+                recurrence_state = None
                 for _L_step in range(self.config.L_cycles):
-                    z_L = self.L_level(z_L, z_H + input_embeddings, **seq_info)
-                z_H = self.L_level(z_H, z_L, **seq_info)
+                    z_L, recurrence_state = self.L_level(
+                        z_L,
+                        z_H + input_embeddings,
+                        recurrence_state=recurrence_state,
+                        **seq_info,
+                    )
+                recurrence_state = None
+                z_H, _ = self.L_level(z_H, z_L, recurrence_state=None, **seq_info)
         # 1 with grad
+        recurrence_state = None
         for _L_step in range(self.config.L_cycles):
-            z_L = self.L_level(z_L, z_H + input_embeddings, **seq_info)
-        z_H = self.L_level(z_H, z_L, **seq_info)
+            z_L, recurrence_state = self.L_level(
+                z_L,
+                z_H + input_embeddings,
+                recurrence_state=recurrence_state,
+                **seq_info,
+            )
+        z_H, _ = self.L_level(z_H, z_L, recurrence_state=None, **seq_info)
 
         # LM Outputs
         new_carry = TinyRecursiveReasoningModel_ACTV1InnerCarry(z_H=z_H.detach(), z_L=z_L.detach())  # New carry no grad

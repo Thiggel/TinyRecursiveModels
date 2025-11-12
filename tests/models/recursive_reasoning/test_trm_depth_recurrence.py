@@ -76,10 +76,19 @@ def test_reasoning_module_depth_modes(recurrence, extra, monkeypatch):
             return real_forward(u, h, state)
 
         monkeypatch.setattr(module.depth_block.cell, "forward", counted)
-        output = module(hidden, injection, cos_sin=None)
+
+    recurrence_state = None
+    output = hidden
+    for _ in range(config.depth_recurrence_steps):
+        output, recurrence_state = module(
+            output,
+            injection,
+            recurrence_state=recurrence_state,
+            cos_sin=None,
+        )
+
+    if module.mode == "recurrent":
         assert call_counter["calls"] == config.depth_recurrence_steps
-    else:
-        output = module(hidden, injection, cos_sin=None)
 
     assert output.shape == hidden.shape
 
@@ -88,4 +97,4 @@ def test_depth_steps_default_matches_transformer_layers():
     torch.manual_seed(0)
     config = build_config(depth_recurrence="rnn", depth_cell_layers=1, depth_recurrence_steps=None)
     module = TinyRecursiveReasoningModel_ACTV1ReasoningModule(config)
-    assert module.depth_block.config.depth_steps == config.L_layers
+    assert module.depth_steps == config.L_cycles

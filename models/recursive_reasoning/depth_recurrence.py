@@ -384,14 +384,18 @@ class DepthRecurrentBlock(nn.Module):
 
         self.norm_eps = config.rms_norm_eps
 
-    def forward(self, hidden_states: torch.Tensor, *, cos_sin=None) -> torch.Tensor:
-        h = hidden_states
-        batch, positions, _ = h.shape
-        state = self.cell.init_state(batch, positions, device=h.device, dtype=h.dtype)
+    def init_state(self, hidden_states: torch.Tensor):
+        batch, positions, _ = hidden_states.shape
+        return self.cell.init_state(batch, positions, device=hidden_states.device, dtype=hidden_states.dtype)
 
-        for _ in range(self.config.depth_steps):
-            attn_input = rms_norm(h, variance_epsilon=self.norm_eps)
-            u = self.attn(cos_sin=cos_sin, hidden_states=attn_input)
-            h, state = self.cell(u, h, state)
+    def forward(self, hidden_states: torch.Tensor, *, state=None, cos_sin=None):
+        if state is None:
+            state = self.init_state(hidden_states)
 
-        return h
+        attn_input = rms_norm(hidden_states, variance_epsilon=self.norm_eps)
+        u = self.attn(cos_sin=cos_sin, hidden_states=attn_input)
+        new_hidden, new_state = self.cell(u, hidden_states, state)
+        return new_hidden, new_state
+
+    def step(self, hidden_states: torch.Tensor, state, *, cos_sin=None):
+        return self.forward(hidden_states, state=state, cos_sin=cos_sin)
