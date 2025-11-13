@@ -1,8 +1,8 @@
 #!/bin/bash -l
 
-#SBATCH --job-name=maze-att
-#SBATCH --output=${WORK}/${REPO_NAME}/job_logs/maze-att_%A.out
-#SBATCH --error=${WORK}/${REPO_NAME}/job_logs/maze-att_%A.err
+#SBATCH --job-name=maze-xlstm
+#SBATCH --output=${WORK}/${REPO_NAME}/job_logs/maze-xlstm_%A.out
+#SBATCH --error=${WORK}/${REPO_NAME}/job_logs/maze-xlstm_%A.err
 #SBATCH --partition=a100
 #SBATCH --gres=gpu:a100:2 -C a100_80
 #SBATCH --time=21:00:00
@@ -79,13 +79,13 @@ PYTHON_USER_SITE=$(apptainer exec "${COMMON_APPTAINER_ARGS_BASE[@]}" "${SIF_PATH
   python -c 'import site, sys; sys.stdout.write(site.getusersitepackages())')
 
 if [[ -z "${PYTHON_USER_SITE}" ]]; then
-  echo "[maze] Failed to resolve python user site directory" >&2
+  echo "[maze-xlstm] Failed to resolve python user site directory" >&2
   exit 1
 fi
 
 COMMON_APPTAINER_ARGS=("${COMMON_APPTAINER_ARGS_BASE[@]}" --env "PYTHONPATH=${PYTHON_USER_SITE}")
 
-RUN_NAME="pretrain_att_maze30x30_a100x2"
+RUN_NAME="pretrain_xlstm_maze30x30_a100x2"
 PROJECT_NAME="Maze-ACT-torch"
 
 DATA_DIR="${WORK_ROOT}/data/maze-30x30-hard-1k"
@@ -93,12 +93,12 @@ CHECKPOINT_DIR="${WORK_ROOT}/checkpoints/${RUN_NAME}"
 HYDRA_DIR="${WORK_ROOT}/hydra/${RUN_NAME}/${SLURM_JOB_ID:-manual}"
 
 if [[ ! -f "${SIF_PATH}" ]]; then
-  echo "[maze] Missing Apptainer image at ${SIF_PATH}. Run jobs/setup.sh first." >&2
+  echo "[maze-xlstm] Missing Apptainer image at ${SIF_PATH}. Run jobs/setup.sh first." >&2
   exit 1
 fi
 
 if [[ ! -d "${DATA_DIR}" ]]; then
-  echo "[maze] Dataset not found at ${DATA_DIR}. Run jobs/setup.sh to prepare datasets." >&2
+  echo "[maze-xlstm] Dataset not found at ${DATA_DIR}. Run jobs/setup.sh to prepare datasets." >&2
   exit 1
 fi
 
@@ -116,15 +116,14 @@ fi
 cd "${REPO_DIR}"
 
 if [[ ! -f "${OVERLAY_PATH}" ]]; then
-  echo "[maze] Missing Apptainer overlay at ${OVERLAY_PATH}. Run jobs/setup.sh first." >&2
+  echo "[maze-xlstm] Missing Apptainer overlay at ${OVERLAY_PATH}. Run jobs/setup.sh first." >&2
   exit 1
 fi
-
-PIP_EXEC=(apptainer exec "${COMMON_APPTAINER_ARGS[@]}" "${SIF_PATH}")
 
 apptainer exec --nv "${COMMON_APPTAINER_ARGS[@]}" \
   "${SIF_PATH}" bash -lc "
     set -euo pipefail
+    python3.10 -m pip install --user -r requirements.txt
     torchrun --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=localhost:0 --nnodes=1 pretrain.py \
       arch=trm \
       data_paths=[\"${DATA_DIR}\"] \
@@ -133,6 +132,9 @@ apptainer exec --nv "${COMMON_APPTAINER_ARGS[@]}" \
       lr=1e-4 puzzle_emb_lr=1e-4 weight_decay=1.0 puzzle_emb_weight_decay=1.0 \
       arch.L_layers=2 \
       arch.H_cycles=3 arch.L_cycles=4 \
+      arch.depth_recurrence=xlstm \
+      arch.depth_recurrence_steps=2 \
+      arch.depth_cell_layers=2 \
       +run_name=${RUN_NAME} \
       project_name=${PROJECT_NAME} \
       checkpoint_path=\"${CHECKPOINT_DIR}\" \

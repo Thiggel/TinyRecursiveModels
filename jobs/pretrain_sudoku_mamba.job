@@ -1,8 +1,8 @@
 #!/bin/bash -l
 
-#SBATCH --job-name=sudoku-att
-#SBATCH --output=${WORK}/${REPO_NAME}/job_logs/sudoku-att_%A.out
-#SBATCH --error=${WORK}/${REPO_NAME}/job_logs/sudoku-att_%A.err
+#SBATCH --job-name=sudoku-mamba
+#SBATCH --output=${WORK}/${REPO_NAME}/job_logs/sudoku-mamba_%A.out
+#SBATCH --error=${WORK}/${REPO_NAME}/job_logs/sudoku-mamba_%A.err
 #SBATCH --partition=a100
 #SBATCH --gres=gpu:a100:1 -C a100_80
 #SBATCH --time=36:00:00
@@ -21,7 +21,7 @@ SCRATCH_ROOT="${SCRATCH}/${REPO_NAME}"
 SIF_PATH="${WORK_ROOT}/containers/pytorch.sif"
 DATA_ROOT="${WORK_ROOT}/data"
 
-RUN_NAME="pretrain_att_sudoku_a100x1"
+RUN_NAME="pretrain_mamba_sudoku_a100x1"
 PROJECT_NAME="Sudoku-ACT-torch"
 
 DATA_DIR="${WORK_ROOT}/data/sudoku-extreme-1k-aug-1000"
@@ -48,12 +48,12 @@ PIP_CACHE_DIR="${BASE_CACHE_DIR}/pip-cache"
 TMPDIR="${SLURM_TMPDIR:-${BASE_CACHE_DIR}/.tmp}"
 
 if [[ ! -f "${SIF_PATH}" ]]; then
-  echo "[sudoku-att] Missing Apptainer image at ${SIF_PATH}. Run jobs/setup.sh first." >&2
+  echo "[sudoku-mamba] Missing Apptainer image at ${SIF_PATH}. Run jobs/setup.sh first." >&2
   exit 1
 fi
 
 if [[ ! -d "${DATA_DIR}" ]]; then
-  echo "[sudoku-att] Dataset not found at ${DATA_DIR}. Run jobs/setup.sh to prepare datasets." >&2
+  echo "[sudoku-mamba] Dataset not found at ${DATA_DIR}. Run jobs/setup.sh to prepare datasets." >&2
   exit 1
 fi
 
@@ -102,6 +102,7 @@ apptainer exec --nv --cleanenv \
   --env TMPDIR="${TMPDIR}" \
   "${SIF_PATH}" bash -lc "
     set -euo pipefail
+    python3.10 -m pip install --user -r requirements.txt
     python3.10 pretrain.py \
       arch=trm \
       data_paths=[\"${DATA_DIR}\"] \
@@ -110,6 +111,11 @@ apptainer exec --nv --cleanenv \
       lr=1e-4 puzzle_emb_lr=1e-4 weight_decay=1.0 puzzle_emb_weight_decay=1.0 \
       arch.L_layers=2 \
       arch.H_cycles=3 arch.L_cycles=6 \
+      arch.depth_recurrence=mamba \
+      arch.depth_recurrence_steps=2 \
+      arch.depth_cell_layers=2 \
+      arch.depth_cell_state_size=64 \
+      arch.depth_cell_expand=1 \
       +run_name=${RUN_NAME} \
       project_name=${PROJECT_NAME} \
       checkpoint_path=\"${CHECKPOINT_DIR}\" \

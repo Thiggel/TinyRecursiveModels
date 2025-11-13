@@ -16,6 +16,7 @@ OVERLAY_DIR="${WORK_ROOT}/overlays"
 OVERLAY_PATH="${OVERLAY_DIR}/python-overlay.ext3"
 OVERLAY_SIZE_MB="${OVERLAY_SIZE_MB:-16384}"
 PYTHON_USER_BASE="${WORK_ROOT}/python"
+PYTHON_BIN=python3.10
 
 BASE_CACHE_DIR="${SCRATCH_ROOT}"
 HF_HOME="${BASE_CACHE_DIR}/hf"
@@ -132,7 +133,7 @@ COMMON_APPTAINER_ARGS_BASE=(
 )
 
 PYTHON_USER_SITE=$(apptainer exec "${COMMON_APPTAINER_ARGS_BASE[@]}" "${SIF_PATH}" \
-  python -c 'import site, sys; sys.stdout.write(site.getusersitepackages())')
+  "${PYTHON_BIN}" -c 'import site, sys; sys.stdout.write(site.getusersitepackages())')
 
 if [[ -z "${PYTHON_USER_SITE}" ]]; then
   echo "[setup] Failed to resolve python user site directory" >&2
@@ -143,9 +144,9 @@ COMMON_APPTAINER_ARGS=("${COMMON_APPTAINER_ARGS_BASE[@]}" --env "PYTHONPATH=${PY
 
 PIP_EXEC=(apptainer exec "${COMMON_APPTAINER_ARGS[@]}" "${SIF_PATH}")
 
-"${PIP_EXEC[@]}" python -m pip install --user --upgrade pip wheel setuptools
-"${PIP_EXEC[@]}" python -m pip install --user -r requirements.txt
-"${PIP_EXEC[@]}" python -c "import adam_atan2_pytorch" >/dev/null
+"${PIP_EXEC[@]}" "${PYTHON_BIN}" -m pip install --user --upgrade pip wheel setuptools
+"${PIP_EXEC[@]}" "${PYTHON_BIN}" -m pip install --user -r requirements.txt
+"${PIP_EXEC[@]}" "${PYTHON_BIN}" -c "import adam_atan2_pytorch" >/dev/null
 
 apptainer exec --nv "${COMMON_APPTAINER_ARGS[@]}" \
   --env DATA_ROOT="${DATA_ROOT}" \
@@ -158,23 +159,23 @@ apptainer exec --nv "${COMMON_APPTAINER_ARGS[@]}" \
              \"\${DATA_ROOT}/sudoku-extreme-1k-aug-1000\" \\
              \"\${DATA_ROOT}/maze-30x30-hard-1k\"
 
-    python -m dataset.build_arc_dataset \\
+    python3.10 -m dataset.build_arc_dataset \\
       --input-file-prefix \"\${ARC_INPUT_PREFIX}\" \\
       --output-dir \"\${DATA_ROOT}/arc1concept-aug-1000\" \\
       --subsets training evaluation concept \\
       --test-set-name evaluation
 
-    python -m dataset.build_arc_dataset \\
+    python3.10 -m dataset.build_arc_dataset \\
       --input-file-prefix \"\${ARC_INPUT_PREFIX}\" \\
       --output-dir \"\${DATA_ROOT}/arc2concept-aug-1000\" \\
       --subsets training2 evaluation2 concept \\
       --test-set-name evaluation2
 
-    python dataset/build_sudoku_dataset.py \\
+    python3.10 dataset/build_sudoku_dataset.py \\
       --output-dir \"\${DATA_ROOT}/sudoku-extreme-1k-aug-1000\" \\
       --subsample-size 1000 \\
       --num-aug 1000
 
-    python dataset/build_maze_dataset.py \\
+    python3.10 dataset/build_maze_dataset.py \\
       --output-dir \"\${DATA_ROOT}/maze-30x30-hard-1k\"
   "

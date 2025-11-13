@@ -92,6 +92,7 @@ apptainer exec --nv --cleanenv \
   --env XDG_CACHE_HOME="${XDG_CACHE_HOME}" \
   --env PYTORCH_LIGHTNING_HOME="${PYTORCH_LIGHTNING_HOME}" \
   --env HYDRA_BASE_DIR="${HYDRA_BASE_DIR}" \
+  --env HYDRA_FULL_ERROR=1 \
   --env CHECKPOINT_ROOT="${CHECKPOINT_ROOT}" \
   --env JOB_LOG_DIR="${JOB_LOG_DIR}" \
   --env DATA_ROOT="${DATA_ROOT}" \
@@ -101,7 +102,7 @@ apptainer exec --nv --cleanenv \
   --env TMPDIR="${TMPDIR}" \
   "${SIF_PATH}" bash -lc "
     set -euo pipefail
-    python pretrain.py \
+    python3.10 pretrain.py \
       arch=trm \
       data_paths=[\"${DATA_DIR}\"] \
       evaluators=\"[]\" \
