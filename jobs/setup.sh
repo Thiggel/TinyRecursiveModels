@@ -12,9 +12,6 @@ SCRATCH_ROOT="${SCRATCH}/${REPO_NAME}"
 SIF_DIR="${WORK_ROOT}/containers"
 SIF_PATH="${SIF_DIR}/pytorch.sif"
 DATA_ROOT="${WORK_ROOT}/data"
-OVERLAY_DIR="${WORK_ROOT}/overlays"
-OVERLAY_PATH="${OVERLAY_DIR}/python-overlay.ext3"
-OVERLAY_SIZE_MB="${OVERLAY_SIZE_MB:-16384}"
 PYTHON_USER_BASE="${WORK_ROOT}/python"
 PYTHON_BIN=python3.10
 
@@ -32,7 +29,6 @@ PYTORCH_LIGHTNING_HOME="${BASE_CACHE_DIR}/lightning_logs"
 HYDRA_BASE_DIR="${WORK_ROOT}/hydra"
 CHECKPOINT_ROOT="${WORK_ROOT}/checkpoints"
 JOB_LOG_DIR="${WORK_ROOT}/job_logs"
-TRM_OVERLAY_PATH="${OVERLAY_PATH}"
 PIP_CACHE_DIR="${BASE_CACHE_DIR}/pip-cache"
 TMPDIR="${SLURM_TMPDIR:-${BASE_CACHE_DIR}/.tmp}"
 
@@ -46,7 +42,7 @@ if ! command -v apptainer >/dev/null 2>&1; then
   exit 1
 fi
 
-mkdir -p "${SIF_DIR}" "${DATA_ROOT}" "${OVERLAY_DIR}" \
+mkdir -p "${SIF_DIR}" "${DATA_ROOT}" \
          "${JOB_LOG_DIR}" "${CHECKPOINT_ROOT}" "${HYDRA_BASE_DIR}" \
          "${PYTHON_USER_BASE}" "${PIP_CACHE_DIR}" "${HF_HOME}" \
          "${HF_DATASETS_CACHE}" "${HF_MODULES_CACHE}" "${TRANSFORMERS_CACHE}" \
@@ -59,17 +55,6 @@ if [[ -z "${SLURM_TMPDIR:-}" ]]; then
 fi
 
 cd "${REPO_DIR}"
-
-if [[ "${FORCE_OVERLAY_REFRESH:-0}" == "1" ]] && [[ -f "${OVERLAY_PATH}" ]]; then
-  rm -f "${OVERLAY_PATH}"
-fi
-
-if [[ ! -f "${OVERLAY_PATH}" ]]; then
-  echo "[setup] Creating Apptainer overlay at ${OVERLAY_PATH}" >&2
-  apptainer overlay create --size "${OVERLAY_SIZE_MB}" "${OVERLAY_PATH}"
-else
-  echo "[setup] Reusing Apptainer overlay at ${OVERLAY_PATH}" >&2
-fi
 
 FORCE_REBUILD=0
 if [[ "${1:-}" == "--force-build" ]]; then
@@ -104,7 +89,6 @@ COMMON_APPTAINER_ARGS_BASE=(
   --bind "${WORK}:${WORK}"
   --bind "${SCRATCH}:${SCRATCH}"
   --bind "${REPO_DIR}:${REPO_DIR}"
-  --overlay "${OVERLAY_PATH}"
   --pwd "${REPO_DIR}"
   --env http_proxy=http://proxy:80
   --env https_proxy=http://proxy:80
@@ -126,7 +110,6 @@ COMMON_APPTAINER_ARGS_BASE=(
   --env CHECKPOINT_ROOT="${CHECKPOINT_ROOT}"
   --env JOB_LOG_DIR="${JOB_LOG_DIR}"
   --env DATA_ROOT="${DATA_ROOT}"
-  --env TRM_OVERLAY_PATH="${TRM_OVERLAY_PATH}"
   --env CUBLAS_WORKSPACE_CONFIG=:4096:8
   --env FLASH_ATTENTION_DETERMINISTIC=0
   --env TMPDIR="${TMPDIR}"

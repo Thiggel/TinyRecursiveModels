@@ -42,7 +42,6 @@ PYTORCH_LIGHTNING_HOME="${BASE_CACHE_DIR}/lightning_logs"
 HYDRA_BASE_DIR="${WORK_ROOT}/hydra"
 CHECKPOINT_ROOT="${WORK_ROOT}/checkpoints"
 JOB_LOG_DIR="${WORK_ROOT}/job_logs"
-TRM_OVERLAY_PATH="${WORK_ROOT}/overlays/python-overlay.ext3"
 PYTHON_USER_BASE="${WORK_ROOT}/python"
 PIP_CACHE_DIR="${BASE_CACHE_DIR}/pip-cache"
 TMPDIR="${SLURM_TMPDIR:-${BASE_CACHE_DIR}/.tmp}"
@@ -96,7 +95,6 @@ apptainer exec --nv --cleanenv \
   --env CHECKPOINT_ROOT="${CHECKPOINT_ROOT}" \
   --env JOB_LOG_DIR="${JOB_LOG_DIR}" \
   --env DATA_ROOT="${DATA_ROOT}" \
-  --env TRM_OVERLAY_PATH="${TRM_OVERLAY_PATH}" \
   --env CUBLAS_WORKSPACE_CONFIG=:4096:8 \
   --env FLASH_ATTENTION_DETERMINISTIC=0 \
   --env TMPDIR="${TMPDIR}" \
