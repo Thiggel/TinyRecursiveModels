@@ -31,7 +31,7 @@ python -m pip install -r requirements.txt
 wandb login YOUR-LOGIN # login if you want the logger to sync results to your Weights & Biases (https://wandb.ai/)
 ```
 
-For HPC workflows we build and run inside an Apptainer image with a writable overlay stored at `${HPCVAULT}/TinyRecursiveModels/overlays/python-overlay.ext3`. Run `bash jobs/setup.sh` to build the container, create the overlay (if needed), install the Python dependencies into `${HPCVAULT}/TinyRecursiveModels/python` via `python -m pip`, and prepare the datasets inside the containerized environment. When adding new packages inside the container, always invoke `python -m pip install --user ...` so that the packages land in the same interpreter environment that `torchrun` will use.
+For HPC workflows we build and run inside an Apptainer image. Run `bash jobs/setup.sh` to build the container, install the Python dependencies into `${HPCVAULT}/TinyRecursiveModels/python` via `python -m pip`, and prepare the datasets inside the containerized environment. When adding new packages inside the container, always invoke `python -m pip install --user ...` so that the packages land in the same interpreter environment that `torchrun` will use.
 
 ### Dataset Preparation
 
