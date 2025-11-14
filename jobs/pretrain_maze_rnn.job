@@ -1,14 +1,17 @@
 #!/bin/bash -l
 
 #SBATCH --job-name=maze-rnn
-#SBATCH --output=${WORK}/${REPO_NAME}/job_logs/maze-rnn_%A.out
+#SBATCH --output=job_logs/maze-rnn_%A.out
 #SBATCH --error=${WORK}/${REPO_NAME}/job_logs/maze-rnn_%A.err
 #SBATCH --partition=a100
 #SBATCH --gres=gpu:a100:2 -C a100_80
 #SBATCH --time=21:00:00
 #SBATCH --nodes=1
 
+module load cuda/12.1.1
+
 set -euo pipefail
+
 
 unset SLURM_EXPORT_ENV
 : "${WORK:?Set WORK to the base work directory}"
@@ -126,6 +129,8 @@ apptainer exec --nv "${COMMON_APPTAINER_ARGS[@]}" \
       arch.depth_recurrence=rnn \
       arch.depth_recurrence_steps=2 \
       arch.depth_cell_layers=2 \
+      arch.depth_cell_state_size=892 \
+      arch.hidden_size=892 \
       +run_name=${RUN_NAME} \
       project_name=${PROJECT_NAME} \
       checkpoint_path=\"${CHECKPOINT_DIR}\" \
