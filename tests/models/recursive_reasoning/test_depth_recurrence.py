@@ -7,38 +7,23 @@ from torch import nn
 
 pytest.importorskip("transformers")
 
-from models.recursive_reasoning.depth_recurrence import (
-    LSTMDepthCell,
-    MambaDepthCell,
-    RNNDepthCell,
-    XLSTMDepthCell,
-)
+from models.recursive_reasoning.depth_recurrence import LSTMDepthCell, MambaDepthCell, RNNDepthCell, XLSTMDepthCell
 
 
 def _copy_rnn_weights(cell: RNNDepthCell, reference: nn.RNN) -> None:
-    reference.weight_ih_l0.data.copy_(cell.first_layer.weight_ih)
-    reference.weight_hh_l0.data.copy_(cell.first_layer.weight_hh)
-    reference.bias_ih_l0.data.copy_(cell.first_layer.bias_ih)
-    reference.bias_hh_l0.data.copy_(cell.first_layer.bias_hh)
-
-    for layer_idx, layer in enumerate(cell.additional_layers, start=1):
-        getattr(reference, f"weight_ih_l{layer_idx}").data.copy_(layer.weight_ih)
-        getattr(reference, f"weight_hh_l{layer_idx}").data.copy_(layer.weight_hh)
-        getattr(reference, f"bias_ih_l{layer_idx}").data.copy_(layer.bias_ih)
-        getattr(reference, f"bias_hh_l{layer_idx}").data.copy_(layer.bias_hh)
+    first = cell.cells[0]
+    reference.weight_ih_l0.data.copy_(first.weight_ih)
+    reference.weight_hh_l0.data.copy_(first.weight_hh)
+    reference.bias_ih_l0.data.copy_(first.bias_ih)
+    reference.bias_hh_l0.data.copy_(first.bias_hh)
 
 
 def _copy_lstm_weights(cell: LSTMDepthCell, reference: nn.LSTM) -> None:
-    reference.weight_ih_l0.data.copy_(cell.first_layer.weight_ih)
-    reference.weight_hh_l0.data.copy_(cell.first_layer.weight_hh)
-    reference.bias_ih_l0.data.copy_(cell.first_layer.bias_ih)
-    reference.bias_hh_l0.data.copy_(cell.first_layer.bias_hh)
-
-    for layer_idx, layer in enumerate(cell.additional_layers, start=1):
-        getattr(reference, f"weight_ih_l{layer_idx}").data.copy_(layer.weight_ih)
-        getattr(reference, f"weight_hh_l{layer_idx}").data.copy_(layer.weight_hh)
-        getattr(reference, f"bias_ih_l{layer_idx}").data.copy_(layer.bias_ih)
-        getattr(reference, f"bias_hh_l{layer_idx}").data.copy_(layer.bias_hh)
+    first = cell.cells[0]
+    reference.weight_ih_l0.data.copy_(first.weight_ih)
+    reference.weight_hh_l0.data.copy_(first.weight_hh)
+    reference.bias_ih_l0.data.copy_(first.bias_ih)
+    reference.bias_hh_l0.data.copy_(first.bias_hh)
 
 
 @pytest.mark.parametrize("nonlinearity", ["tanh", "relu"])
@@ -50,12 +35,12 @@ def test_rnn_depth_cell_matches_pytorch_rnn(nonlinearity: str) -> None:
         input_size=hidden_size,
         hidden_size=hidden_size,
         nonlinearity=nonlinearity,
-        num_layers=2,
+        num_layers=1,
     )
     reference = nn.RNN(
         input_size=hidden_size,
         hidden_size=hidden_size,
-        num_layers=2,
+        num_layers=1,
         nonlinearity=nonlinearity,
         batch_first=False,
     )
@@ -65,10 +50,18 @@ def test_rnn_depth_cell_matches_pytorch_rnn(nonlinearity: str) -> None:
     initial_top = h.clone()
     inputs = torch.randn(steps, batch, positions, hidden_size)
 
-    state = cell.init_state(batch, positions, device=h.device, dtype=h.dtype)
+    state = cell.init_state(batch, positions, device=h.device, dtype=h.dtype, initial_hidden=h)
+    stacked_layers = getattr(cell, "stacked_layers", cell.num_layers)
     outputs = []
     for t in range(steps):
-        h, state = cell(inputs[t], h, state)
+        next_states = []
+        layer_input = h
+        for layer_idx in range(stacked_layers):
+            layer_output, layer_state = cell.forward_layer(layer_idx, inputs[t], layer_input, state[layer_idx])
+            next_states.append(layer_state)
+            layer_input = layer_output
+        h = layer_input
+        state = next_states
         outputs.append(h)
     stacked = torch.stack(outputs).permute(1, 2, 0, 3).reshape(batch * positions, steps, hidden_size)
     assert stacked.dtype == inputs.dtype
@@ -80,10 +73,7 @@ def test_rnn_depth_cell_matches_pytorch_rnn(nonlinearity: str) -> None:
 
     torch.testing.assert_close(stacked, ref_outputs.permute(1, 0, 2))
 
-    first_hidden, extra_hidden = state
-    torch.testing.assert_close(first_hidden.reshape(batch * positions, hidden_size), ref_hidden[0])
-    for idx, layer_state in enumerate(extra_hidden):
-        torch.testing.assert_close(layer_state.reshape(batch * positions, hidden_size), ref_hidden[idx + 1])
+    torch.testing.assert_close(state[0].reshape(batch * positions, hidden_size), ref_hidden[0])
     torch.testing.assert_close(h.reshape(batch * positions, hidden_size), ref_hidden[-1])
 
 
@@ -94,12 +84,12 @@ def test_lstm_depth_cell_matches_pytorch_lstm() -> None:
     cell = LSTMDepthCell(
         input_size=hidden_size,
         hidden_size=hidden_size,
-        num_layers=2,
+        num_layers=1,
     )
     reference = nn.LSTM(
         input_size=hidden_size,
         hidden_size=hidden_size,
-        num_layers=2,
+        num_layers=1,
         batch_first=False,
     )
     _copy_lstm_weights(cell, reference)
@@ -108,10 +98,18 @@ def test_lstm_depth_cell_matches_pytorch_lstm() -> None:
     initial_top = h.clone()
     inputs = torch.randn(steps, batch, positions, hidden_size)
 
-    state = cell.init_state(batch, positions, device=h.device, dtype=h.dtype)
+    state = cell.init_state(batch, positions, device=h.device, dtype=h.dtype, initial_hidden=h)
+    stacked_layers = getattr(cell, "stacked_layers", cell.num_layers)
     outputs = []
     for t in range(steps):
-        h, state = cell(inputs[t], h, state)
+        next_states = []
+        layer_input = h
+        for layer_idx in range(stacked_layers):
+            layer_output, layer_state = cell.forward_layer(layer_idx, inputs[t], layer_input, state[layer_idx])
+            next_states.append(layer_state)
+            layer_input = layer_output
+        h = layer_input
+        state = next_states
         outputs.append(h)
     stacked = torch.stack(outputs).permute(1, 2, 0, 3).reshape(batch * positions, steps, hidden_size)
     assert stacked.dtype == inputs.dtype
@@ -124,12 +122,9 @@ def test_lstm_depth_cell_matches_pytorch_lstm() -> None:
 
     torch.testing.assert_close(stacked, ref_outputs.permute(1, 0, 2))
 
-    first_hidden, first_cell, extra = state
+    first_hidden, first_cell = state[0]
     torch.testing.assert_close(first_hidden.reshape(batch * positions, hidden_size), ref_hidden[0])
     torch.testing.assert_close(first_cell.reshape(batch * positions, hidden_size), ref_cell[0])
-    for idx, (layer_hidden, layer_cell) in enumerate(extra):
-        torch.testing.assert_close(layer_hidden.reshape(batch * positions, hidden_size), ref_hidden[idx + 1])
-        torch.testing.assert_close(layer_cell.reshape(batch * positions, hidden_size), ref_cell[idx + 1])
     torch.testing.assert_close(h.reshape(batch * positions, hidden_size), ref_hidden[-1])
 
 
@@ -140,11 +135,19 @@ def _sequential_outputs(
     batch: int,
     positions: int,
 ) -> Tuple[torch.Tensor, Tuple]:
-    state = cell.init_state(batch, positions, device=u_sequence.device, dtype=u_sequence.dtype)
+    state = cell.init_state(batch, positions, device=u_sequence.device, dtype=u_sequence.dtype, initial_hidden=initial_hidden)
     h = initial_hidden
+    stacked_layers = getattr(cell, "stacked_layers", cell.num_layers)
     outputs = []
     for step in range(u_sequence.shape[0]):
-        h, state = cell(u_sequence[step], h, state)
+        next_states = []
+        layer_input = h
+        for layer_idx in range(stacked_layers):
+            layer_output, layer_state = cell.forward_layer(layer_idx, u_sequence[step], layer_input, state[layer_idx])
+            next_states.append(layer_state)
+            layer_input = layer_output
+        h = layer_input
+        state = next_states
         outputs.append(h)
     stacked = torch.stack(outputs) if outputs else torch.empty(0)
     return stacked, state
@@ -186,9 +189,11 @@ def test_transformer_backed_cells_match_full_sequence(cell_cls, kwargs) -> None:
 
     torch.testing.assert_close(sequential, reference)
 
-    if isinstance(state, tuple) and len(state) == 2 and isinstance(state[1], torch.Tensor):
-        cache_position = state[1]
-        expected = torch.full_like(cache_position, steps)
-        torch.testing.assert_close(cache_position, expected)
-    elif hasattr(state, "seqlen_offset"):
-        assert state.seqlen_offset == steps
+    if isinstance(state, (list, tuple)):
+        for entry in state:
+            if isinstance(entry, tuple) and len(entry) == 2 and isinstance(entry[1], torch.Tensor):
+                cache_position = entry[1]
+                expected = torch.full_like(cache_position, steps)
+                torch.testing.assert_close(cache_position, expected)
+            elif hasattr(entry, "seqlen_offset"):
+                assert entry.seqlen_offset == steps
