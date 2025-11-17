@@ -7,7 +7,14 @@ from torch import nn
 
 pytest.importorskip("transformers")
 
-from models.recursive_reasoning.depth_recurrence import LSTMDepthCell, MambaDepthCell, RNNDepthCell, XLSTMDepthCell
+from models.recursive_reasoning.depth_recurrence import (
+    DepthRecurrentBlock,
+    DepthRecurrentConfig,
+    LSTMDepthCell,
+    MambaDepthCell,
+    RNNDepthCell,
+    XLSTMDepthCell,
+)
 
 
 def _copy_rnn_weights(cell: RNNDepthCell, reference: nn.RNN) -> None:
@@ -197,3 +204,42 @@ def test_transformer_backed_cells_match_full_sequence(cell_cls, kwargs) -> None:
                 torch.testing.assert_close(cache_position, expected)
             elif hasattr(entry, "seqlen_offset"):
                 assert entry.seqlen_offset == steps
+
+
+def test_lstm_depth_block_checkpoint_matches_standard() -> None:
+    torch.manual_seed(0)
+    hidden_size = 8
+    batch, positions = 2, 2
+    config_kwargs = dict(
+        hidden_size=hidden_size,
+        num_heads=2,
+        expansion=2.0,
+        rms_norm_eps=1e-5,
+        depth_steps=2,
+        cell_type="lstm",
+        cell_layers=1,
+    )
+
+    base_block = DepthRecurrentBlock(DepthRecurrentConfig(**config_kwargs))
+    checkpoint_block = DepthRecurrentBlock(
+        DepthRecurrentConfig(**{**config_kwargs, "depth_checkpoint": True})
+    )
+    checkpoint_block.load_state_dict(base_block.state_dict())
+
+    input_tensor = torch.randn(batch, positions, hidden_size, requires_grad=True)
+    checkpoint_input = input_tensor.detach().clone().requires_grad_(True)
+
+    base_state = base_block.init_state(input_tensor)
+    checkpoint_state = checkpoint_block.init_state(checkpoint_input)
+
+    base_output, _ = base_block(input_tensor, state=base_state, cos_sin=None)
+    checkpoint_output, _ = checkpoint_block(
+        checkpoint_input, state=checkpoint_state, cos_sin=None
+    )
+
+    torch.testing.assert_close(checkpoint_output, base_output)
+
+    base_output.sum().backward()
+    checkpoint_output.sum().backward()
+
+    torch.testing.assert_close(checkpoint_input.grad, input_tensor.grad)

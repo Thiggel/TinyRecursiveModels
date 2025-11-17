@@ -75,6 +75,7 @@ class TinyRecursiveReasoningModel_ACTV1Config(BaseModel):
     depth_cell_xlstm_step_kernel: str = "native"
     depth_cell_xlstm_num_heads: Optional[int] = None
     depth_cell_mamba_impl: str = "mamba2"
+    depth_checkpoint: bool = False
 
 class TinyRecursiveReasoningModel_ACTV1Block(nn.Module):
     def __init__(self, config: TinyRecursiveReasoningModel_ACTV1Config) -> None:
@@ -150,6 +151,7 @@ class TinyRecursiveReasoningModel_ACTV1ReasoningModule(nn.Module):
                 xlstm_step_kernel=config.depth_cell_xlstm_step_kernel,
                 xlstm_num_heads=config.depth_cell_xlstm_num_heads,
                 mamba_impl=config.depth_cell_mamba_impl,
+                depth_checkpoint=config.depth_checkpoint,
             )
             self.layers = None
             self.depth_block = DepthRecurrentBlock(recurrent_config)
