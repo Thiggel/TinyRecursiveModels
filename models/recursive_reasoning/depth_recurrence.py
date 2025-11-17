@@ -33,7 +33,8 @@ class DepthRecurrentConfig:
     xlstm_step_kernel: str = "native"
     xlstm_num_heads: Optional[int] = None
     mamba_impl: str = "mamba2"
-    depth_checkpoint: bool = False
+    # If None, checkpointing is enabled automatically for LSTM depth recurrence.
+    depth_checkpoint: Optional[bool] = None
 
 
 class DepthRecurrentCell(nn.Module):
@@ -417,7 +418,10 @@ class DepthRecurrentBlock(nn.Module):
         self.config = config
         self.cell_type = config.cell_type.lower()
         self.cell_layers = max(1, config.cell_layers)
-        self.depth_checkpoint = config.depth_checkpoint
+        if config.depth_checkpoint is None:
+            self.depth_checkpoint = self.cell_type == "lstm"
+        else:
+            self.depth_checkpoint = config.depth_checkpoint
 
         cell_hidden_size = config.cell_hidden_size or config.hidden_size
         cell_type = config.cell_type.lower()

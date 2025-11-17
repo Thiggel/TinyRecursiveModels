@@ -113,7 +113,6 @@ apptainer exec --nv --cleanenv \
       arch.H_cycles=3 arch.L_cycles=6 \
       arch.depth_recurrence=lstm \
       arch.depth_recurrence_steps=2 \
-      arch.depth_checkpoint=True \
       arch.depth_cell_layers=2 \
       arch.depth_cell_hidden_size=512 \
       +run_name=${RUN_NAME} \

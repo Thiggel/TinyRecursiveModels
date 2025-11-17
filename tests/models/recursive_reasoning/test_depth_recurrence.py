@@ -220,10 +220,10 @@ def test_lstm_depth_block_checkpoint_matches_standard() -> None:
         cell_layers=1,
     )
 
-    base_block = DepthRecurrentBlock(DepthRecurrentConfig(**config_kwargs))
-    checkpoint_block = DepthRecurrentBlock(
-        DepthRecurrentConfig(**{**config_kwargs, "depth_checkpoint": True})
+    base_block = DepthRecurrentBlock(
+        DepthRecurrentConfig(**{**config_kwargs, "depth_checkpoint": False})
     )
+    checkpoint_block = DepthRecurrentBlock(DepthRecurrentConfig(**config_kwargs))
     checkpoint_block.load_state_dict(base_block.state_dict())
 
     input_tensor = torch.randn(batch, positions, hidden_size, requires_grad=True)
