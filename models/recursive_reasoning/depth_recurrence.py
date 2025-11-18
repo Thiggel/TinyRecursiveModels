@@ -2,9 +2,42 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Optional, Tuple
+from contextlib import nullcontext
 
 import torch
 from torch import nn
+from torch.utils.checkpoint import checkpoint
+
+
+def _is_torch_compiling() -> bool:
+    """Return True when running under torch.compile/AOT Autograd graphs."""
+
+    compiler = getattr(torch, "compiler", None)
+    if compiler is not None and hasattr(compiler, "is_compiling"):
+        return compiler.is_compiling()
+
+    dynamo = getattr(torch, "_dynamo", None)
+    if dynamo is not None and hasattr(dynamo, "is_compiling"):
+        return dynamo.is_compiling()
+
+    return False
+
+
+def _sdp_kernel_context(disable_flash: bool):
+    if not disable_flash:
+        return nullcontext()
+
+    if not hasattr(torch, "backends"):
+        return nullcontext()
+
+    backend = getattr(torch.backends, "cuda", None)
+    if backend is None or not hasattr(backend, "sdp_kernel"):
+        return nullcontext()
+
+    try:
+        return backend.sdp_kernel(enable_flash=False, enable_math=True, enable_mem_efficient=True)
+    except Exception:
+        return nullcontext()
 
 from transformers import MambaConfig, MambaModel, xLSTMConfig, xLSTMModel
 from transformers.models.mamba.modeling_mamba import MambaCache
@@ -32,6 +65,8 @@ class DepthRecurrentConfig:
     xlstm_step_kernel: str = "native"
     xlstm_num_heads: Optional[int] = None
     mamba_impl: str = "mamba2"
+    # If None, checkpointing is enabled automatically for LSTM depth recurrence.
+    depth_checkpoint: Optional[bool] = None
 
 
 class DepthRecurrentCell(nn.Module):
@@ -415,6 +450,10 @@ class DepthRecurrentBlock(nn.Module):
         self.config = config
         self.cell_type = config.cell_type.lower()
         self.cell_layers = max(1, config.cell_layers)
+        if config.depth_checkpoint is None:
+            self.depth_checkpoint = self.cell_type == "lstm"
+        else:
+            self.depth_checkpoint = config.depth_checkpoint
 
         cell_hidden_size = config.cell_hidden_size or config.hidden_size
         cell_type = config.cell_type.lower()
@@ -515,6 +554,9 @@ class DepthRecurrentBlock(nn.Module):
         if state is None:
             state = self.init_state(hidden_states)
 
+        is_compiling = _is_torch_compiling()
+        use_checkpoint = self.cell_type == "lstm" and self.depth_checkpoint and torch.is_grad_enabled()
+
         next_states = []
         layer_input = hidden_states
         for layer_idx in range(self.stacked_layers):
@@ -524,9 +566,41 @@ class DepthRecurrentBlock(nn.Module):
                 layer_state = state
             if self.cell_type in {"rnn", "lstm"}:
                 layer_module = self.layers[layer_idx]
-                layer_output, new_layer_state = layer_module(
-                    layer_input, state=layer_state, cos_sin=cos_sin
-                )
+                if self.cell_type == "lstm" and use_checkpoint:
+                    h_prev, c_prev = layer_state if layer_state is not None else (None, None)
+                    if c_prev is None:
+                        c_prev = torch.zeros_like(layer_input)
+                    h_prev_for_call = layer_input if h_prev is None else h_prev
+                    if cos_sin is None:
+                        empty = torch.tensor([], device=layer_input.device, dtype=layer_input.dtype)
+                        cos, sin = empty, empty
+                    else:
+                        cos, sin = cos_sin
+
+                    def layer_forward(layer_input_tensor, h_prev_tensor, c_prev_tensor, cos_tensor, sin_tensor):
+                        cos_sin_tuple = None
+                        if cos_tensor.numel() and sin_tensor.numel():
+                            cos_sin_tuple = (cos_tensor, sin_tensor)
+                        with _sdp_kernel_context(disable_flash=is_compiling):
+                            return layer_module(
+                                layer_input=layer_input_tensor,
+                                state=(h_prev_tensor, c_prev_tensor),
+                                cos_sin=cos_sin_tuple,
+                            )
+
+                    layer_output, new_layer_state = checkpoint(
+                        layer_forward,
+                        layer_input,
+                        h_prev_for_call,
+                        c_prev,
+                        cos,
+                        sin,
+                        use_reentrant=False,
+                    )
+                else:
+                    layer_output, new_layer_state = layer_module(
+                        layer_input, state=layer_state, cos_sin=cos_sin
+                    )
             else:
                 attn_input = rms_norm(layer_input, variance_epsilon=self.norm_eps)
                 u = self.attn(cos_sin=cos_sin, hidden_states=attn_input)
