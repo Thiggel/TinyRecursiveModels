@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Optional, Tuple
+from contextlib import nullcontext
 
 import torch
 from torch import nn
@@ -20,6 +21,23 @@ def _is_torch_compiling() -> bool:
         return dynamo.is_compiling()
 
     return False
+
+
+def _sdp_kernel_context(disable_flash: bool):
+    if not disable_flash:
+        return nullcontext()
+
+    if not hasattr(torch, "backends"):
+        return nullcontext()
+
+    backend = getattr(torch.backends, "cuda", None)
+    if backend is None or not hasattr(backend, "sdp_kernel"):
+        return nullcontext()
+
+    try:
+        return backend.sdp_kernel(enable_flash=False, enable_math=True, enable_mem_efficient=True)
+    except Exception:
+        return nullcontext()
 
 from transformers import MambaConfig, MambaModel, xLSTMConfig, xLSTMModel
 from transformers.models.mamba.modeling_mamba import MambaCache
@@ -536,12 +554,8 @@ class DepthRecurrentBlock(nn.Module):
         if state is None:
             state = self.init_state(hidden_states)
 
-        use_checkpoint = (
-            self.cell_type == "lstm"
-            and self.depth_checkpoint
-            and torch.is_grad_enabled()
-            and not _is_torch_compiling()
-        )
+        is_compiling = _is_torch_compiling()
+        use_checkpoint = self.cell_type == "lstm" and self.depth_checkpoint and torch.is_grad_enabled()
 
         next_states = []
         layer_input = hidden_states
@@ -567,11 +581,12 @@ class DepthRecurrentBlock(nn.Module):
                         cos_sin_tuple = None
                         if cos_tensor.numel() and sin_tensor.numel():
                             cos_sin_tuple = (cos_tensor, sin_tensor)
-                        return layer_module(
-                            layer_input=layer_input_tensor,
-                            state=(h_prev_tensor, c_prev_tensor),
-                            cos_sin=cos_sin_tuple,
-                        )
+                        with _sdp_kernel_context(disable_flash=is_compiling):
+                            return layer_module(
+                                layer_input=layer_input_tensor,
+                                state=(h_prev_tensor, c_prev_tensor),
+                                cos_sin=cos_sin_tuple,
+                            )
 
                     layer_output, new_layer_state = checkpoint(
                         layer_forward,

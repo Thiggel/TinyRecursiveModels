@@ -243,3 +243,31 @@ def test_lstm_depth_block_checkpoint_matches_standard() -> None:
     checkpoint_output.sum().backward()
 
     torch.testing.assert_close(checkpoint_input.grad, input_tensor.grad)
+
+
+def test_lstm_depth_block_checkpoint_compiles_with_torch_compile() -> None:
+    if not hasattr(torch, "compile"):
+        pytest.skip("torch.compile unavailable")
+
+    torch.manual_seed(0)
+    hidden_size = 4
+    batch, positions = 2, 2
+    config = DepthRecurrentConfig(
+        hidden_size=hidden_size,
+        num_heads=2,
+        expansion=2.0,
+        rms_norm_eps=1e-5,
+        depth_steps=2,
+        cell_type="lstm",
+        cell_layers=1,
+    )
+
+    block = DepthRecurrentBlock(config)
+    compiled = torch.compile(block)
+
+    input_tensor = torch.randn(batch, positions, hidden_size, requires_grad=True)
+
+    output, _ = compiled(input_tensor, state=None, cos_sin=None)
+    output.sum().backward()
+
+    assert input_tensor.grad is not None
