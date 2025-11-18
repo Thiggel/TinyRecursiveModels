@@ -129,11 +129,12 @@ apptainer exec --nv "${COMMON_APPTAINER_ARGS[@]}" \
       arch.depth_recurrence=rnn \
       arch.depth_recurrence_steps=2 \
       arch.depth_cell_layers=2 \
-      arch.depth_cell_state_size=892 \
-      arch.hidden_size=892 \
+      arch.depth_cell_state_size=768 \
+      arch.hidden_size=768 \
       +run_name=${RUN_NAME} \
       project_name=${PROJECT_NAME} \
       checkpoint_path=\"${CHECKPOINT_DIR}\" \
       hydra.run.dir=\"${HYDRA_DIR}\" \
+      +load_checkpoint=\"${CHECKPOINT_DIR}/step_6510\" \
       ema=True
   "
