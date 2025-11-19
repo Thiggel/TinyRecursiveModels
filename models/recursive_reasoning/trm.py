@@ -63,12 +63,11 @@ class TinyRecursiveReasoningModel_ACTV1Config(BaseModel):
     puzzle_emb_len: int = 16 # if non-zero, its specified to this value
     no_ACT_continue: bool =  True # No continue ACT loss, only use the sigmoid of the halt which makes much more sense
     depth_recurrence: str = "transformer"
-    depth_recurrence_steps: Optional[int] = None
     depth_cell_hidden_size: Optional[int] = None
     depth_cell_state_size: int = 64
     depth_cell_expand: int = 1
     depth_cell_conv_kernel: int = 4
-    depth_cell_layers: int = 1
+    depth_cell_layers: Optional[int] = None
     depth_cell_nonlinearity: str = "tanh"
     depth_cell_xlstm_chunkwise_kernel: str = "chunkwise--native_autograd"
     depth_cell_xlstm_sequence_kernel: str = "native_sequence__native"
@@ -132,20 +131,23 @@ class TinyRecursiveReasoningModel_ACTV1ReasoningModule(nn.Module):
             self.depth_block = None
         else:
             self.mode = "recurrent"
-            depth_steps = config.depth_recurrence_steps or config.L_cycles
-            self.depth_steps = max(1, depth_steps)
+            if config.depth_cell_layers is not None:
+                cell_layers = config.depth_cell_layers
+            elif recurrence in {"rnn", "lstm"}:
+                cell_layers = config.L_layers
+            else:
+                cell_layers = 1
             recurrent_config = DepthRecurrentConfig(
                 hidden_size=config.hidden_size,
                 num_heads=config.num_heads,
                 expansion=config.expansion,
                 rms_norm_eps=config.rms_norm_eps,
-                depth_steps=self.depth_steps,
                 cell_type=recurrence,
                 cell_hidden_size=config.depth_cell_hidden_size,
                 cell_state_size=config.depth_cell_state_size,
                 cell_expand=config.depth_cell_expand,
                 cell_conv_kernel=config.depth_cell_conv_kernel,
-                cell_layers=config.depth_cell_layers,
+                cell_layers=cell_layers,
                 cell_nonlinearity=config.depth_cell_nonlinearity,
                 xlstm_chunkwise_kernel=config.depth_cell_xlstm_chunkwise_kernel,
                 xlstm_sequence_kernel=config.depth_cell_xlstm_sequence_kernel,
@@ -156,8 +158,6 @@ class TinyRecursiveReasoningModel_ACTV1ReasoningModule(nn.Module):
             )
             self.layers = None
             self.depth_block = DepthRecurrentBlock(recurrent_config)
-        if self.mode == "transformer":
-            self.depth_steps = config.L_layers
 
     def forward(
         self,
