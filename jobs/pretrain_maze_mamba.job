@@ -124,7 +124,6 @@ apptainer exec --nv "${COMMON_APPTAINER_ARGS[@]}" \
       arch.L_layers=2 \
       arch.H_cycles=3 arch.L_cycles=4 \
       arch.depth_recurrence=mamba \
-      arch.depth_recurrence_steps=2 \
       arch.depth_cell_layers=2 \
       arch.depth_cell_state_size=64 \
       arch.depth_cell_expand=1 \

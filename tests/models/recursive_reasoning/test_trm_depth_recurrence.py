@@ -36,8 +36,8 @@ def build_config(**overrides):
     "recurrence, extra",
     [
         ("transformer", {}),
-        ("rnn", {"depth_cell_layers": 2}),
-        ("lstm", {"depth_cell_layers": 2}),
+        ("rnn", {}),
+        ("lstm", {}),
         (
             "xlstm",
             {
@@ -57,9 +57,9 @@ def build_config(**overrides):
         ),
     ],
 )
-def test_reasoning_module_depth_modes(recurrence, extra, monkeypatch):
+def test_reasoning_module_depth_modes(recurrence, extra):
     torch.manual_seed(0)
-    kwargs = dict(depth_recurrence=recurrence, depth_recurrence_steps=3)
+    kwargs = dict(depth_recurrence=recurrence)
     kwargs.update(extra)
     config = build_config(**kwargs)
 
@@ -67,34 +67,25 @@ def test_reasoning_module_depth_modes(recurrence, extra, monkeypatch):
     hidden = torch.randn(config.batch_size, config.seq_len, config.hidden_size)
     injection = torch.randn_like(hidden)
 
-    if module.mode == "recurrent":
-        call_counter = {"calls": 0}
-        real_forward = module.depth_block.cell.forward
-
-        def counted(u, h, state):
-            call_counter["calls"] += 1
-            return real_forward(u, h, state)
-
-        monkeypatch.setattr(module.depth_block.cell, "forward", counted)
-
     recurrence_state = None
-    output = hidden
-    for _ in range(config.depth_recurrence_steps):
-        output, recurrence_state = module(
-            output,
-            injection,
-            recurrence_state=recurrence_state,
-            cos_sin=None,
-        )
-
-    if module.mode == "recurrent":
-        assert call_counter["calls"] == config.depth_recurrence_steps
+    output, recurrence_state = module(
+        hidden,
+        injection,
+        recurrence_state=recurrence_state,
+        cos_sin=None,
+    )
 
     assert output.shape == hidden.shape
+    if module.mode == "transformer":
+        assert recurrence_state is None
+    else:
+        assert recurrence_state is not None
 
 
-def test_depth_steps_default_matches_transformer_layers():
+@pytest.mark.parametrize("recurrence", ["rnn", "lstm"])
+def test_depth_recurrent_layers_default_to_transformer_block_depth(recurrence):
     torch.manual_seed(0)
-    config = build_config(depth_recurrence="rnn", depth_cell_layers=1, depth_recurrence_steps=None)
+    config = build_config(depth_recurrence=recurrence)
     module = TinyRecursiveReasoningModel_ACTV1ReasoningModule(config)
-    assert module.depth_steps == config.L_cycles
+    assert module.depth_block is not None
+    assert module.depth_block.stacked_layers == config.L_layers

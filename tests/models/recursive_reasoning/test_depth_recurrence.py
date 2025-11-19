@@ -135,6 +135,31 @@ def test_lstm_depth_cell_matches_pytorch_lstm() -> None:
     torch.testing.assert_close(h.reshape(batch * positions, hidden_size), ref_hidden[-1])
 
 
+def test_rnn_and_lstm_attention_layers_concatenate_mlp_and_attention() -> None:
+    torch.manual_seed(0)
+    hidden_size = 6
+    base_kwargs = dict(
+        hidden_size=hidden_size,
+        num_heads=2,
+        expansion=2.0,
+        rms_norm_eps=1e-5,
+        cell_layers=1,
+    )
+
+    rnn_block = DepthRecurrentBlock(
+        DepthRecurrentConfig(**base_kwargs, cell_type="rnn")
+    )
+    lstm_block = DepthRecurrentBlock(
+        DepthRecurrentConfig(**base_kwargs, cell_type="lstm")
+    )
+
+    rnn_layer = rnn_block.layers[0]
+    lstm_layer = lstm_block.layers[0]
+
+    assert rnn_layer.rnn.input_size == hidden_size * 2
+    assert lstm_layer.lstm.input_size == hidden_size * 2
+
+
 def _sequential_outputs(
     cell: torch.nn.Module,
     u_sequence: torch.Tensor,
@@ -215,7 +240,6 @@ def test_lstm_depth_block_checkpoint_matches_standard() -> None:
         num_heads=2,
         expansion=2.0,
         rms_norm_eps=1e-5,
-        depth_steps=2,
         cell_type="lstm",
         cell_layers=1,
     )
@@ -257,7 +281,6 @@ def test_lstm_depth_block_checkpoint_compiles_with_torch_compile() -> None:
         num_heads=2,
         expansion=2.0,
         rms_norm_eps=1e-5,
-        depth_steps=2,
         cell_type="lstm",
         cell_layers=1,
     )

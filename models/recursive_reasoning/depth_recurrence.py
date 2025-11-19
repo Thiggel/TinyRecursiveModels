@@ -43,7 +43,7 @@ from transformers import MambaConfig, MambaModel, xLSTMConfig, xLSTMModel
 from transformers.models.mamba.modeling_mamba import MambaCache
 from transformers.models.xlstm.modeling_xlstm import xLSTMCache
 
-from models.layers import Attention, rms_norm
+from models.layers import Attention, SwiGLU, rms_norm
 
 
 @dataclass
@@ -52,7 +52,6 @@ class DepthRecurrentConfig:
     num_heads: int
     expansion: float
     rms_norm_eps: float
-    depth_steps: int
     cell_type: str
     cell_hidden_size: Optional[int] = None
     cell_state_size: int = 64
@@ -213,6 +212,7 @@ class RNNAttentionLayer(nn.Module):
         *,
         num_heads: int,
         nonlinearity: str,
+        expansion: float,
         rms_norm_eps: float,
     ) -> None:
         super().__init__()
@@ -225,8 +225,9 @@ class RNNAttentionLayer(nn.Module):
             num_key_value_heads=num_heads,
             causal=False,
         )
+        self.mlp = SwiGLU(hidden_size=hidden_size, expansion=expansion)
         self.rnn = nn.RNNCell(
-            input_size=hidden_size,
+            input_size=hidden_size * 2,
             hidden_size=hidden_size,
             nonlinearity=nonlinearity,
         )
@@ -240,7 +241,9 @@ class RNNAttentionLayer(nn.Module):
     ):
         batch, positions, _ = layer_input.shape
         attn_input = rms_norm(layer_input, variance_epsilon=self.rms_norm_eps)
-        u = self.attn(cos_sin=cos_sin, hidden_states=attn_input)
+        attn_out = self.attn(cos_sin=cos_sin, hidden_states=attn_input)
+        mlp_out = self.mlp(attn_input)
+        u = torch.cat([mlp_out, attn_out], dim=-1)
 
         orig_dtype = u.dtype
         compute_dtype = self.rnn.weight_ih.dtype
@@ -256,7 +259,7 @@ class RNNAttentionLayer(nn.Module):
 
 
 class LSTMAttentionLayer(nn.Module):
-    def __init__(self, hidden_size: int, *, num_heads: int, rms_norm_eps: float) -> None:
+    def __init__(self, hidden_size: int, *, num_heads: int, expansion: float, rms_norm_eps: float) -> None:
         super().__init__()
         self.hidden_size = hidden_size
         self.rms_norm_eps = rms_norm_eps
@@ -267,7 +270,8 @@ class LSTMAttentionLayer(nn.Module):
             num_key_value_heads=num_heads,
             causal=False,
         )
-        self.lstm = nn.LSTMCell(input_size=hidden_size, hidden_size=hidden_size)
+        self.mlp = SwiGLU(hidden_size=hidden_size, expansion=expansion)
+        self.lstm = nn.LSTMCell(input_size=hidden_size * 2, hidden_size=hidden_size)
 
     def forward(
         self,
@@ -279,7 +283,9 @@ class LSTMAttentionLayer(nn.Module):
         batch, positions, _ = layer_input.shape
         h_prev, c_prev = state
         attn_input = rms_norm(layer_input, variance_epsilon=self.rms_norm_eps)
-        u = self.attn(cos_sin=cos_sin, hidden_states=attn_input)
+        attn_out = self.attn(cos_sin=cos_sin, hidden_states=attn_input)
+        mlp_out = self.mlp(attn_input)
+        u = torch.cat([mlp_out, attn_out], dim=-1)
 
         orig_dtype = u.dtype
         compute_dtype = self.lstm.weight_ih.dtype
@@ -470,6 +476,7 @@ class DepthRecurrentBlock(nn.Module):
                         config.hidden_size,
                         num_heads=config.num_heads,
                         nonlinearity=config.cell_nonlinearity,
+                        expansion=config.expansion,
                         rms_norm_eps=config.rms_norm_eps,
                     )
                     for _ in range(self.cell_layers)
@@ -482,6 +489,7 @@ class DepthRecurrentBlock(nn.Module):
                     LSTMAttentionLayer(
                         config.hidden_size,
                         num_heads=config.num_heads,
+                        expansion=config.expansion,
                         rms_norm_eps=config.rms_norm_eps,
                     )
                     for _ in range(self.cell_layers)
