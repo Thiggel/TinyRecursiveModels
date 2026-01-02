@@ -70,15 +70,16 @@ class ACTLossHead(nn.Module):
             is_correct = mask & (torch.argmax(outputs["logits"], dim=-1) == labels)
             seq_is_correct = is_correct.sum(-1) == loss_counts
             
-            # Metrics (halted)
-            valid_metrics = new_carry.halted & (loss_counts > 0)
+            # Metrics (always count non-pad tokens, even if not halted yet)
+            valid_metrics = loss_counts > 0
             metrics = {
                 "count": valid_metrics.sum(),
-                
                 "accuracy":       torch.where(valid_metrics, (is_correct.to(torch.float32) / loss_divisor).sum(-1), 0).sum(),
                 "exact_accuracy": (valid_metrics & seq_is_correct).sum(),
 
+                # Q-halt correctness still compared to sequence correctness
                 "q_halt_accuracy": (valid_metrics & ((outputs["q_halt_logits"] >= 0) == seq_is_correct)).sum(),
+                # Track how many steps were taken even if sequences haven't halted yet
                 "steps":          torch.where(valid_metrics, new_carry.steps, 0).sum(),
             }
 
@@ -100,4 +101,3 @@ class ACTLossHead(nn.Module):
         detached_outputs = {k: outputs[k].detach() for k in return_keys if k in outputs}
 
         return new_carry, lm_loss + 0.5 * (q_halt_loss + q_continue_loss), metrics, detached_outputs, new_carry.halted.all()
-

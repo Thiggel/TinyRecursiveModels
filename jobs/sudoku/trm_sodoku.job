@@ -4,7 +4,7 @@
 #SBATCH --output=job_logs/train_%A.txt
 #SBATCH --partition=a100
 #SBATCH --gres=gpu:a100:8 -C a100_80
-#SBATCH --time=23:00:00
+#SBATCH --time=24:00:00
 #SBATCH --nodes=1
 
 unset SLURM_EXPORT_ENV

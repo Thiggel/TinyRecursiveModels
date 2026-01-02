@@ -9,6 +9,7 @@ hydra:
 
 project_name: null
 checkpoint_path: null
+load_checkpoint: null
 
 # Data path
 data_paths: ['data/arc-aug-1000']
@@ -27,6 +28,7 @@ checkpoint_every_eval: True
 lr: 1e-4
 lr_min_ratio: 1.0
 lr_warmup_steps: 2000
+optimizer: adam_atan2
 
 # Standard hyperparameter settings for LM, as used in Llama
 beta1: 0.9

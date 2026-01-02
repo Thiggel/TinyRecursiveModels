@@ -1,12 +1,14 @@
 #!/bin/bash -l
 
-#SBATCH --job-name=arc1-trm
-#SBATCH --output=${WORK}/${REPO_NAME}/job_logs/arc1-trm_%A.out
-#SBATCH --error=${WORK}/${REPO_NAME}/job_logs/arc1-trm_%A.err
+#SBATCH --job-name=sudoku-lstm
+#SBATCH --output=job_logs/sudoku-lstm_%A.out
+#SBATCH --error=job_logs/sudoku-lstm_%A.err
 #SBATCH --partition=a100
-#SBATCH --gres=gpu:a100:4 -C a100_80
-#SBATCH --time=72:00:00
+#SBATCH --gres=gpu:a100:1 -C a100_80
+#SBATCH --time=24:00:00
 #SBATCH --nodes=1
+
+module load cuda/12.1.1
 
 set -euo pipefail
 
@@ -21,10 +23,10 @@ SCRATCH_ROOT="${SCRATCH}/${REPO_NAME}"
 SIF_PATH="${WORK_ROOT}/containers/pytorch.sif"
 DATA_ROOT="${WORK_ROOT}/data"
 
-RUN_NAME="pretrain_att_arc1concept_a100x4"
-PROJECT_NAME="ARC1-ACT-torch"
+RUN_NAME="pretrain_lstm_sudoku_a100x1"
+PROJECT_NAME="Sudoku-ACT-torch"
 
-DATA_DIR="${WORK_ROOT}/data/arc1concept-aug-1000"
+DATA_DIR="${WORK_ROOT}/data/sudoku-extreme-1k-aug-1000"
 CHECKPOINT_DIR="${WORK_ROOT}/checkpoints/${RUN_NAME}"
 HYDRA_DIR="${WORK_ROOT}/hydra/${RUN_NAME}/${SLURM_JOB_ID:-manual}"
 
@@ -41,18 +43,18 @@ XDG_CACHE_HOME="${BASE_CACHE_DIR}/.cache"
 PYTORCH_LIGHTNING_HOME="${BASE_CACHE_DIR}/lightning_logs"
 HYDRA_BASE_DIR="${WORK_ROOT}/hydra"
 CHECKPOINT_ROOT="${WORK_ROOT}/checkpoints"
-JOB_LOG_DIR="${WORK_ROOT}/job_logs"
+JOB_LOG_DIR="job_logs"
 PYTHON_USER_BASE="${WORK_ROOT}/python"
 PIP_CACHE_DIR="${BASE_CACHE_DIR}/pip-cache"
 TMPDIR="${SLURM_TMPDIR:-${BASE_CACHE_DIR}/.tmp}"
 
 if [[ ! -f "${SIF_PATH}" ]]; then
-  echo "[arc1] Missing Apptainer image at ${SIF_PATH}. Run jobs/setup.sh first." >&2
+  echo "[sudoku-lstm] Missing Apptainer image at ${SIF_PATH}. Run jobs/setup.sh first." >&2
   exit 1
 fi
 
 if [[ ! -d "${DATA_DIR}" ]]; then
-  echo "[arc1] Dataset not found at ${DATA_DIR}. Run jobs/setup.sh to prepare datasets." >&2
+  echo "[sudoku-lstm] Dataset not found at ${DATA_DIR}. Run jobs/setup.sh to prepare datasets." >&2
   exit 1
 fi
 
@@ -91,6 +93,7 @@ apptainer exec --nv --cleanenv \
   --env XDG_CACHE_HOME="${XDG_CACHE_HOME}" \
   --env PYTORCH_LIGHTNING_HOME="${PYTORCH_LIGHTNING_HOME}" \
   --env HYDRA_BASE_DIR="${HYDRA_BASE_DIR}" \
+  --env HYDRA_FULL_ERROR=1 \
   --env CHECKPOINT_ROOT="${CHECKPOINT_ROOT}" \
   --env JOB_LOG_DIR="${JOB_LOG_DIR}" \
   --env DATA_ROOT="${DATA_ROOT}" \
@@ -99,11 +102,18 @@ apptainer exec --nv --cleanenv \
   --env TMPDIR="${TMPDIR}" \
   "${SIF_PATH}" bash -lc "
     set -euo pipefail
-    torchrun --nproc-per-node=4 --rdzv_backend=c10d --rdzv_endpoint=localhost:0 --nnodes=1 pretrain.py \
+    python3.10 -m pip install --user -r requirements.txt
+    python3.10 pretrain.py \
       arch=trm \
       data_paths=[\"${DATA_DIR}\"] \
+      evaluators=\"[]\" \
+      epochs=50000 eval_interval=5000 \
+      lr=1e-4 puzzle_emb_lr=1e-4 weight_decay=1.0 puzzle_emb_weight_decay=1.0 \
       arch.L_layers=2 \
-      arch.H_cycles=3 arch.L_cycles=4 \
+      arch.H_cycles=3 arch.L_cycles=6 \
+      arch.depth_recurrence=lstm \
+      arch.depth_cell_layers=2 \
+      arch.depth_cell_hidden_size=512 \
       +run_name=${RUN_NAME} \
       project_name=${PROJECT_NAME} \
       checkpoint_path=\"${CHECKPOINT_DIR}\" \
