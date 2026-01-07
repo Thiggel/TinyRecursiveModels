@@ -13,11 +13,138 @@ from models.sparse_embedding import CastedSparseEmbedding
 
 IGNORE_LABEL_ID = -100
 
+
+class RMSNorm(nn.Module):
+    def __init__(self, dim: int, eps: float = 1e-8) -> None:
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(dim))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        input_dtype = x.dtype
+        x = x.to(torch.float32)
+        rms = x.pow(2).mean(dim=-1, keepdim=True)
+        x = x * torch.rsqrt(rms + self.eps)
+        return (x.to(input_dtype) * self.weight.to(input_dtype))
+
+
+def sinkhorn_log_doubly_stochastic(logits: torch.Tensor, n_iters: int = 20, tau: float = 0.05) -> torch.Tensor:
+    n = logits.shape[-1]
+    Z = logits / tau
+    log_marginal = torch.zeros((n,), device=logits.device, dtype=logits.dtype)
+
+    u = torch.zeros(logits.shape[:-1], device=Z.device, dtype=Z.dtype)
+    v = torch.zeros_like(u)
+
+    for _ in range(n_iters):
+        u = log_marginal - torch.logsumexp(Z + v.unsqueeze(-2), dim=-1)
+        v = log_marginal - torch.logsumexp(Z + u.unsqueeze(-1), dim=-2)
+
+    return torch.exp(Z + u.unsqueeze(-1) + v.unsqueeze(-2))
+
+
+class MHCAttentionSubLayer(nn.Module):
+    def __init__(self, attention: Attention) -> None:
+        super().__init__()
+        self.attention = attention
+
+    def forward(self, x: torch.Tensor, *, cos_sin: CosSin | None = None) -> torch.Tensor:
+        return self.attention(cos_sin=cos_sin, hidden_states=x)
+
+
+class MHCFFNSubLayer(nn.Module):
+    def __init__(self, mlp: SwiGLU) -> None:
+        super().__init__()
+        self.mlp = mlp
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.mlp(x)
+
+
+class ManifoldHyperConnectionLayer(nn.Module):
+    def __init__(
+        self,
+        hidden_dim: int,
+        n_streams: int,
+        sublayer: nn.Module,
+        *,
+        sinkhorn_iters: int = 20,
+        eps: float = 1e-6,
+        sinkhorn_tau: float = 0.05,
+        alpha_init: float = 1e-2,
+    ) -> None:
+        super().__init__()
+        self.hidden_dim = hidden_dim
+        self.n_streams = n_streams
+        self.sublayer = sublayer
+        self.sinkhorn_iters = sinkhorn_iters
+        self.eps = eps
+        self.sinkhorn_tau = sinkhorn_tau
+
+        d = hidden_dim * n_streams
+        self.rms = RMSNorm(d)
+
+        self.fc_pre = nn.Linear(d, n_streams, bias=False)
+        self.fc_post = nn.Linear(d, n_streams, bias=False)
+        self.fc_res = nn.Linear(d, n_streams * n_streams, bias=False)
+
+        self.bias_pre = nn.Parameter(torch.zeros(n_streams))
+        self.bias_post = nn.Parameter(torch.zeros(n_streams))
+        self.bias_res = nn.Parameter(torch.zeros(n_streams * n_streams))
+
+        self.alpha_pre = nn.Parameter(torch.zeros(1))
+        self.alpha_post = nn.Parameter(torch.zeros(1))
+        self.alpha_res = nn.Parameter(torch.zeros(1))
+
+        with torch.no_grad():
+            self.alpha_pre.fill_(alpha_init)
+            self.alpha_post.fill_(alpha_init)
+            self.alpha_res.fill_(alpha_init)
+
+    def forward(self, x_streams: torch.Tensor, **sublayer_kwargs) -> torch.Tensor:
+        B, S, n, C = x_streams.shape
+        assert n == self.n_streams and C == self.hidden_dim
+        d = n * C
+
+        x_flat = x_streams.reshape(B * S, d).to(torch.float32)
+        x_norm = self.rms(x_flat)
+
+        H_pre_tilde = self.alpha_pre * self.fc_pre(x_norm) + self.bias_pre
+        H_post_tilde = self.alpha_post * self.fc_post(x_norm) + self.bias_post
+        H_res_tilde = self.alpha_res * self.fc_res(x_norm) + self.bias_res
+
+        H_pre = torch.sigmoid(H_pre_tilde)
+        H_post = 2.0 * torch.sigmoid(H_post_tilde)
+
+        H_res = H_res_tilde.view(B * S, n, n)
+        H_res = sinkhorn_log_doubly_stochastic(
+            H_res, n_iters=self.sinkhorn_iters, tau=self.sinkhorn_tau
+        )
+
+        H_pre = H_pre.view(B, S, n)
+        H_post = H_post.view(B, S, n)
+        H_res = H_res.view(B, S, n, n)
+
+        H_pre_weights = H_pre / (H_pre.sum(dim=-1, keepdim=True) + self.eps)
+        H_post_weights = H_post / (H_post.sum(dim=-1, keepdim=True) + self.eps)
+
+        dtype = x_streams.dtype
+        H_pre_weights = H_pre_weights.to(dtype)
+        H_post_weights = H_post_weights.to(dtype)
+        H_res = H_res.to(dtype)
+
+        x_layer = torch.einsum("bsnc,bsn->bsc", x_streams, H_pre_weights)
+        x_layer = x_layer.to(dtype)
+        y = self.sublayer(x_layer, **sublayer_kwargs)
+        y_expanded = H_post_weights.unsqueeze(-1) * y.unsqueeze(2)
+
+        x_mixed = torch.einsum("bsic,bsoi->bsoc", x_streams, H_res)
+        return x_mixed + y_expanded
+
 @dataclass
 class TinyRecursiveReasoningModel_ACTV1InnerCarry:
     z_H: torch.Tensor
     z_L: torch.Tensor
-    memory: torch.Tensor
 
 
 @dataclass
@@ -63,10 +190,14 @@ class TinyRecursiveReasoningModel_ACTV1Config(BaseModel):
     mlp_t: bool = False # use mlp on L instead of transformer
     puzzle_emb_len: int = 16 # if non-zero, its specified to this value
     no_ACT_continue: bool =  True # No continue ACT loss, only use the sigmoid of the halt which makes much more sense
-    memory_shared_across_layers: bool = False  # If True, use one memory tensor shared across all layers
-    memory_learnable_init: bool = False  # If True, learn a reset-state for memory
     tbptt_steps: int = 0  # If > 0, detach carry every N ACT steps (truncated BPTT across steps)
 
+    # mHC config
+    mhc_streams: int = 4
+    mhc_sinkhorn_iters: int = 20
+    mhc_eps: float = 1e-6
+    mhc_sinkhorn_tau: float = 0.05
+    mhc_alpha_init: float = 1e-2
 
 class TinyRecursiveReasoningModel_ACTV1Block(nn.Module):
     def __init__(self, config: TinyRecursiveReasoningModel_ACTV1Config) -> None:
@@ -87,49 +218,55 @@ class TinyRecursiveReasoningModel_ACTV1Block(nn.Module):
                 num_key_value_heads=config.num_heads,
                 causal=False
             )
+            self.mhc_attn = ManifoldHyperConnectionLayer(
+                hidden_dim=config.hidden_size,
+                n_streams=config.mhc_streams,
+                sublayer=MHCAttentionSubLayer(self.self_attn),
+                sinkhorn_iters=config.mhc_sinkhorn_iters,
+                eps=config.mhc_eps,
+                sinkhorn_tau=config.mhc_sinkhorn_tau,
+                alpha_init=config.mhc_alpha_init,
+            )
         self.mlp = SwiGLU(
             hidden_size=config.hidden_size,
             expansion=config.expansion,
         )
-        self.g_attn = CastedLinear(config.hidden_size, config.hidden_size, bias=True)
-        self.u_attn = CastedLinear(config.hidden_size, config.hidden_size, bias=True)
-        self.g_mlp = CastedLinear(config.hidden_size, config.hidden_size, bias=True)
-        self.u_mlp = CastedLinear(config.hidden_size, config.hidden_size, bias=True)
+        if not self.config.mlp_t:
+            self.mhc_mlp = ManifoldHyperConnectionLayer(
+                hidden_dim=config.hidden_size,
+                n_streams=config.mhc_streams,
+                sublayer=MHCFFNSubLayer(self.mlp),
+                sinkhorn_iters=config.mhc_sinkhorn_iters,
+                eps=config.mhc_eps,
+                sinkhorn_tau=config.mhc_sinkhorn_tau,
+                alpha_init=config.mhc_alpha_init,
+            )
         self.norm_eps = config.rms_norm_eps
 
-    def forward(
-        self,
-        cos_sin: CosSin,
-        hidden_states: torch.Tensor,
-        memory: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, cos_sin: CosSin, hidden_states: torch.Tensor) -> torch.Tensor:
         # Post Norm
         if self.config.mlp_t:
-            hidden_states_t = hidden_states.transpose(1, 2)
-            attn_out = self.mlp_t(hidden_states_t).transpose(1, 2)
-        else:
-            attn_out = self.self_attn(cos_sin=cos_sin, hidden_states=hidden_states)
+            hidden_states = hidden_states.transpose(1, 2)
+            out = self.mlp_t(hidden_states)
+            hidden_states = rms_norm(hidden_states + out, variance_epsilon=self.norm_eps)
+            hidden_states = hidden_states.transpose(1, 2)
+            out = self.mlp(hidden_states)
+            hidden_states = rms_norm(hidden_states + out, variance_epsilon=self.norm_eps)
+            return hidden_states
 
-        g = torch.sigmoid(self.g_attn(hidden_states))
-        u = torch.sigmoid(self.u_attn(hidden_states))
-        memory = g * memory + u * attn_out
-        hidden_states = rms_norm(hidden_states + memory, variance_epsilon=self.norm_eps)
-
-        mlp_out = self.mlp(hidden_states)
-        g = torch.sigmoid(self.g_mlp(hidden_states))
-        u = torch.sigmoid(self.u_mlp(hidden_states))
-        memory = g * memory + u * mlp_out
-        hidden_states = rms_norm(hidden_states + memory, variance_epsilon=self.norm_eps)
-        return hidden_states, memory
-
+        hidden_states = self.mhc_attn(hidden_states, cos_sin=cos_sin)
+        hidden_states = rms_norm(hidden_states, variance_epsilon=self.norm_eps)
+        hidden_states = self.mhc_mlp(hidden_states)
+        hidden_states = rms_norm(hidden_states, variance_epsilon=self.norm_eps)
+        return hidden_states
 
 class TinyRecursiveReasoningModel_ACTV1ReasoningModule(nn.Module):
     def __init__(self, config: TinyRecursiveReasoningModel_ACTV1Config):
         super().__init__()
-        self.config = config
         self.layers = torch.nn.ModuleList(
             [TinyRecursiveReasoningModel_ACTV1Block(config) for _ in range(config.L_layers)]
         )
+        self.config = config
 
     def forward(
         self,
@@ -140,39 +277,18 @@ class TinyRecursiveReasoningModel_ACTV1ReasoningModule(nn.Module):
         **kwargs,
     ):
         hidden_states = hidden_states + input_injection
-        cos_sin = kwargs.get("cos_sin")
-        if self.config.memory_shared_across_layers:
-            if recurrence_state is None:
-                memory = torch.zeros_like(hidden_states)
-            else:
-                memory = recurrence_state
+        if self.config.mlp_t:
             for layer in self.layers:
-                hidden_states, memory = layer(
-                    cos_sin=cos_sin,
-                    hidden_states=hidden_states,
-                    memory=memory,
-                )
-            return hidden_states, memory
+                hidden_states = layer(hidden_states=hidden_states, **kwargs)
+            return hidden_states, None
 
-        if recurrence_state is None:
-            recurrence_state = torch.zeros(
-                (len(self.layers),) + hidden_states.shape,
-                device=hidden_states.device,
-                dtype=hidden_states.dtype,
-            )
-        elif isinstance(recurrence_state, list):
-            recurrence_state = torch.stack(recurrence_state, dim=0)
-
-        next_state = []
-        for layer_idx, layer in enumerate(self.layers):
-            layer_state = recurrence_state[layer_idx]
-            hidden_states, layer_state = layer(
-                cos_sin=cos_sin,
-                hidden_states=hidden_states,
-                memory=layer_state,
-            )
-            next_state.append(layer_state)
-        return hidden_states, torch.stack(next_state, dim=0)
+        B, S, C = hidden_states.shape
+        n_streams = self.config.mhc_streams
+        hidden_streams = hidden_states.unsqueeze(2).expand(B, S, n_streams, C).contiguous()
+        for layer in self.layers:
+            hidden_streams = layer(hidden_states=hidden_streams, **kwargs)
+        hidden_states = hidden_streams.mean(dim=2)
+        return hidden_states, None
 
 
 class TinyRecursiveReasoningModel_ACTV1_Inner(nn.Module):
@@ -212,12 +328,6 @@ class TinyRecursiveReasoningModel_ACTV1_Inner(nn.Module):
         # Initial states
         self.H_init = nn.Buffer(trunc_normal_init_(torch.empty(self.config.hidden_size, dtype=self.forward_dtype), std=1), persistent=True)
         self.L_init = nn.Buffer(trunc_normal_init_(torch.empty(self.config.hidden_size, dtype=self.forward_dtype), std=1), persistent=True)
-        if self.config.memory_learnable_init:
-            if self.config.memory_shared_across_layers:
-                init_shape = (self.config.hidden_size,)
-            else:
-                init_shape = (self.config.L_layers, self.config.hidden_size)
-            self.M_init = nn.Parameter(trunc_normal_init_(torch.empty(init_shape, dtype=self.forward_dtype), std=1))
 
         # Q head special init
         # Init Q to (almost) zero for faster learning during bootstrapping
@@ -251,47 +361,18 @@ class TinyRecursiveReasoningModel_ACTV1_Inner(nn.Module):
         return TinyRecursiveReasoningModel_ACTV1InnerCarry(
             z_H=torch.empty(batch_size, self.config.seq_len + self.puzzle_emb_len, self.config.hidden_size, dtype=self.forward_dtype),
             z_L=torch.empty(batch_size, self.config.seq_len + self.puzzle_emb_len, self.config.hidden_size, dtype=self.forward_dtype),
-            memory=self._empty_memory(batch_size),
         )
-
-    def _empty_memory(self, batch_size: int):
-        seq_len = self.config.seq_len + self.puzzle_emb_len
-        shape = (batch_size, seq_len, self.config.hidden_size)
-        if self.config.memory_shared_across_layers:
-            return torch.empty(shape, dtype=self.forward_dtype)
-        return torch.empty((self.config.L_layers,) + shape, dtype=self.forward_dtype)
-
-    def _memory_init_like(self, memory: torch.Tensor):
-        if not self.config.memory_learnable_init:
-            return torch.zeros_like(memory)
-        if self.config.memory_shared_across_layers:
-            base = self.M_init.view(1, 1, -1)
-            return base.expand(memory.shape[0], memory.shape[1], memory.shape[2])
-        base = self.M_init.view(self.config.L_layers, 1, 1, -1)
-        return base.expand(self.config.L_layers, memory.shape[1], memory.shape[2], memory.shape[3])
-
-    def _reset_memory(self, reset_flag: torch.Tensor, memory: torch.Tensor):
-        if self.config.memory_shared_across_layers:
-            reset_mask = reset_flag.view(-1, 1, 1)
-        else:
-            reset_mask = reset_flag.view(1, -1, 1, 1)
-        init_value = self._memory_init_like(memory)
-        return torch.where(reset_mask, init_value, memory)
         
     def reset_carry(self, reset_flag: torch.Tensor, carry: TinyRecursiveReasoningModel_ACTV1InnerCarry):
         return TinyRecursiveReasoningModel_ACTV1InnerCarry(
             z_H=torch.where(reset_flag.view(-1, 1, 1), self.H_init, carry.z_H),
             z_L=torch.where(reset_flag.view(-1, 1, 1), self.L_init, carry.z_L),
-            memory=self._reset_memory(reset_flag, carry.memory),
         )
 
     def _apply_detach(self, tensor: torch.Tensor, detach_mask: torch.Tensor | None):
         if detach_mask is None:
             return tensor.detach()
-        if tensor.ndim == 3:
-            mask = detach_mask.view(-1, 1, 1)
-        else:
-            mask = detach_mask.view(1, -1, 1, 1)
+        mask = detach_mask.view(-1, 1, 1)
         return torch.where(mask, tensor.detach(), tensor)
 
     def forward(
@@ -311,10 +392,10 @@ class TinyRecursiveReasoningModel_ACTV1_Inner(nn.Module):
         # Forward iterations
         it = 0
         z_H, z_L = carry.z_H, carry.z_L
-        recurrence_state = carry.memory
         # H_cycles-1 without grad
         with torch.no_grad():
             for _H_step in range(self.config.H_cycles-1):
+                recurrence_state = None
                 for _L_step in range(self.config.L_cycles):
                     z_L, recurrence_state = self.L_level(
                         z_L,
@@ -322,13 +403,10 @@ class TinyRecursiveReasoningModel_ACTV1_Inner(nn.Module):
                         recurrence_state=recurrence_state,
                         **seq_info,
                     )
-                z_H, recurrence_state = self.L_level(
-                    z_H,
-                    z_L,
-                    recurrence_state=recurrence_state,
-                    **seq_info,
-                )
+                recurrence_state = None
+                z_H, _ = self.L_level(z_H, z_L, recurrence_state=None, **seq_info)
         # 1 with grad
+        recurrence_state = None
         for _L_step in range(self.config.L_cycles):
             z_L, recurrence_state = self.L_level(
                 z_L,
@@ -336,18 +414,12 @@ class TinyRecursiveReasoningModel_ACTV1_Inner(nn.Module):
                 recurrence_state=recurrence_state,
                 **seq_info,
             )
-        z_H, recurrence_state = self.L_level(
-            z_H,
-            z_L,
-            recurrence_state=recurrence_state,
-            **seq_info,
-        )
+        z_H, _ = self.L_level(z_H, z_L, recurrence_state=None, **seq_info)
 
         # LM Outputs
         new_carry = TinyRecursiveReasoningModel_ACTV1InnerCarry(
             z_H=self._apply_detach(z_H, detach_mask),
             z_L=self._apply_detach(z_L, detach_mask),
-            memory=self._apply_detach(recurrence_state, detach_mask),
         )  # New carry (detached by default; tbptt can keep grads)
         output = self.lm_head(z_H)[:, self.puzzle_emb_len:]
         q_logits = self.q_head(z_H[:, 0]).to(torch.float32) # Q-head; uses the first puzzle_emb position

@@ -62,6 +62,7 @@ class TinyRecursiveReasoningModel_ACTV1Config(BaseModel):
     mlp_t: bool = False # use mlp on L instead of transformer
     puzzle_emb_len: int = 16 # if non-zero, its specified to this value
     no_ACT_continue: bool =  True # No continue ACT loss, only use the sigmoid of the halt which makes much more sense
+    tbptt_steps: int = 0  # If > 0, detach carry every N ACT steps (truncated BPTT across steps)
 
 class TinyRecursiveReasoningModel_ACTV1Block(nn.Module):
     def __init__(self, config: TinyRecursiveReasoningModel_ACTV1Config) -> None:
@@ -203,7 +204,19 @@ class TinyRecursiveReasoningModel_ACTV1_Inner(nn.Module):
             z_L=torch.where(reset_flag.view(-1, 1, 1), self.L_init, carry.z_L),
         )
 
-    def forward(self, carry: TinyRecursiveReasoningModel_ACTV1InnerCarry, batch: Dict[str, torch.Tensor]) -> Tuple[TinyRecursiveReasoningModel_ACTV1InnerCarry, torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+    def _apply_detach(self, tensor: torch.Tensor, detach_mask: torch.Tensor | None):
+        if detach_mask is None:
+            return tensor.detach()
+        mask = detach_mask.view(-1, 1, 1)
+        return torch.where(mask, tensor.detach(), tensor)
+
+    def forward(
+        self,
+        carry: TinyRecursiveReasoningModel_ACTV1InnerCarry,
+        batch: Dict[str, torch.Tensor],
+        *,
+        detach_mask: torch.Tensor | None = None,
+    ) -> Tuple[TinyRecursiveReasoningModel_ACTV1InnerCarry, torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         seq_info = dict(
             cos_sin=self.rotary_emb() if hasattr(self, "rotary_emb") else None,
         )
@@ -239,7 +252,10 @@ class TinyRecursiveReasoningModel_ACTV1_Inner(nn.Module):
         z_H, _ = self.L_level(z_H, z_L, recurrence_state=None, **seq_info)
 
         # LM Outputs
-        new_carry = TinyRecursiveReasoningModel_ACTV1InnerCarry(z_H=z_H.detach(), z_L=z_L.detach())  # New carry no grad
+        new_carry = TinyRecursiveReasoningModel_ACTV1InnerCarry(
+            z_H=self._apply_detach(z_H, detach_mask),
+            z_L=self._apply_detach(z_L, detach_mask),
+        )  # New carry (detached by default; tbptt can keep grads)
         output = self.lm_head(z_H)[:, self.puzzle_emb_len:]
         q_logits = self.q_head(z_H[:, 0]).to(torch.float32) # Q-head; uses the first puzzle_emb position
         return new_carry, output, (q_logits[..., 0], q_logits[..., 1])
@@ -278,8 +294,19 @@ class TinyRecursiveReasoningModel_ACTV1(nn.Module):
 
         new_current_data = {k: torch.where(carry.halted.view((-1, ) + (1, ) * (batch[k].ndim - 1)), batch[k], v) for k, v in carry.current_data.items()}
 
+        # Determine detach mask for truncated BPTT across ACT steps
+        if self.training and self.config.tbptt_steps > 0:
+            step_after = torch.where(carry.halted, 0, carry.steps) + 1
+            detach_mask = (step_after % self.config.tbptt_steps == 0)
+        else:
+            detach_mask = None
+
         # Forward inner model
-        new_inner_carry, logits, (q_halt_logits, q_continue_logits) = self.inner(new_inner_carry, new_current_data)
+        new_inner_carry, logits, (q_halt_logits, q_continue_logits) = self.inner(
+            new_inner_carry,
+            new_current_data,
+            detach_mask=detach_mask,
+        )
 
         outputs = {
             "logits": logits,

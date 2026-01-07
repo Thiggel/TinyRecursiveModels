@@ -1,4 +1,4 @@
-name: recursive_reasoning.trm@TinyRecursiveReasoningModel_ACTV1
+name: recursive_reasoning.trm_mhc@TinyRecursiveReasoningModel_ACTV1
 loss:
   name: losses@ACTLossHead
   loss_type: stablemax_cross_entropy
@@ -37,3 +37,9 @@ depth_cell_xlstm_step_kernel: native
 depth_cell_xlstm_num_heads: null
 depth_cell_mamba_impl: mamba2
 tbptt_steps: 0
+
+mhc_streams: 4
+mhc_sinkhorn_iters: 20
+mhc_eps: 1e-6
+mhc_sinkhorn_tau: 0.05
+mhc_alpha_init: 1e-2

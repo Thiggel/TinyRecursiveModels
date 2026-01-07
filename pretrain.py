@@ -618,8 +618,16 @@ def launch(hydra_config: DictConfig):
                 print("EVALUATE")
             if config.ema:
                 print("SWITCH TO EMA")
-                train_state_eval = copy.deepcopy(train_state)
-                train_state_eval.model = ema_helper.ema_copy(train_state_eval.model)
+                # Avoid deepcopy on modules/tensors (PyTorch disallows non-leaf deepcopy).
+                # Build a lightweight eval state with EMA model only.
+                train_state_eval = TrainState(
+                    model=ema_helper.ema_copy(train_state.model),
+                    optimizers=train_state.optimizers,
+                    optimizer_lrs=train_state.optimizer_lrs,
+                    carry=train_state.carry,
+                    step=train_state.step,
+                    total_steps=train_state.total_steps,
+                )
             else:
                 train_state_eval = train_state
             train_state_eval.model.eval()
