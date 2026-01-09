@@ -1,16 +1,7 @@
 #!/bin/bash -l
 
-#SBATCH --job-name=sudoku-trm-mhc-10steps
-#SBATCH --output=job_logs/sudoku-trm-mhc-10steps_%A.out
-#SBATCH --error=job_logs/sudoku-trm-mhc-10steps_%A.err
-#SBATCH --partition=a100
-#SBATCH --gres=gpu:a100:1 -C a100_80
-#SBATCH --time=24:00:00
-#SBATCH --nodes=1
-
 set -euo pipefail
 
-unset SLURM_EXPORT_ENV
 : "${WORK:?Set WORK to the base work directory}"
 : "${SCRATCH:?Set SCRATCH to the base scratch directory}"
 
@@ -19,14 +10,6 @@ REPO_DIR="${HOME}/${REPO_NAME}"
 WORK_ROOT="${WORK}/${REPO_NAME}"
 SCRATCH_ROOT="${SCRATCH}/${REPO_NAME}"
 SIF_PATH="${WORK_ROOT}/containers/pytorch.sif"
-DATA_ROOT="${WORK_ROOT}/data"
-
-RUN_NAME="pretrain_trm_mhc_sudoku_noact_10steps_a100x1"
-PROJECT_NAME="Sudoku-ACT-torch"
-
-DATA_DIR="${WORK_ROOT}/data/sudoku-extreme-1k-aug-1000"
-CHECKPOINT_DIR="${WORK_ROOT}/checkpoints/${RUN_NAME}"
-HYDRA_DIR="${WORK_ROOT}/hydra/${RUN_NAME}/${SLURM_JOB_ID:-manual}"
 
 BASE_CACHE_DIR="${SCRATCH_ROOT}"
 HF_HOME="${BASE_CACHE_DIR}/hf"
@@ -39,12 +22,24 @@ WANDB_DIR="${BASE_CACHE_DIR}/wandb"
 TORCH_HOME="${BASE_CACHE_DIR}/torch"
 XDG_CACHE_HOME="${BASE_CACHE_DIR}/.cache"
 PYTORCH_LIGHTNING_HOME="${BASE_CACHE_DIR}/lightning_logs"
-HYDRA_BASE_DIR="${WORK_ROOT}/hydra"
-CHECKPOINT_ROOT="${WORK_ROOT}/checkpoints"
-JOB_LOG_DIR="job_logs"
 PYTHON_USER_BASE="${WORK_ROOT}/python"
 PIP_CACHE_DIR="${BASE_CACHE_DIR}/pip-cache"
 TMPDIR="${SLURM_TMPDIR:-${BASE_CACHE_DIR}/.tmp}"
+
+if [[ ! -f "${SIF_PATH}" ]]; then
+  echo "[mhc-triton-tests] Missing Apptainer image at ${SIF_PATH}. Run jobs/setup.sh first." >&2
+  exit 1
+fi
+
+mkdir -p "${PIP_CACHE_DIR}" "${HF_HOME}" "${HF_DATASETS_CACHE}" \
+         "${HF_MODULES_CACHE}" "${TRANSFORMERS_CACHE}" \
+         "${DEEPSPEED_CACHE_DIR}" "${TRITON_CACHE_DIR}" \
+         "${WANDB_DIR}" "${TORCH_HOME}" "${XDG_CACHE_HOME}" \
+         "${PYTORCH_LIGHTNING_HOME}"
+
+if [[ -z "${SLURM_TMPDIR:-}" ]]; then
+  mkdir -p "${TMPDIR}"
+fi
 
 COMMON_APPTAINER_ARGS_BASE=(
   --cleanenv
@@ -68,42 +63,15 @@ COMMON_APPTAINER_ARGS_BASE=(
   --env TORCH_HOME="${TORCH_HOME}"
   --env XDG_CACHE_HOME="${XDG_CACHE_HOME}"
   --env PYTORCH_LIGHTNING_HOME="${PYTORCH_LIGHTNING_HOME}"
-  --env HYDRA_BASE_DIR="${HYDRA_BASE_DIR}"
   --env HYDRA_FULL_ERROR=1
-  --env CHECKPOINT_ROOT="${CHECKPOINT_ROOT}"
-  --env JOB_LOG_DIR="${JOB_LOG_DIR}"
-  --env DATA_ROOT="${DATA_ROOT}"
-  --env CUBLAS_WORKSPACE_CONFIG=:4096:8
-  --env FLASH_ATTENTION_DETERMINISTIC=0
   --env TMPDIR="${TMPDIR}"
 )
-
-if [[ ! -f "${SIF_PATH}" ]]; then
-  echo "[sudoku-trm-10steps] Missing Apptainer image at ${SIF_PATH}. Run jobs/setup.sh first." >&2
-  exit 1
-fi
-
-if [[ ! -d "${DATA_DIR}" ]]; then
-  echo "[sudoku-trm-10steps] Dataset not found at ${DATA_DIR}. Run jobs/setup.sh to prepare datasets." >&2
-  exit 1
-fi
-
-mkdir -p "${JOB_LOG_DIR}" "${CHECKPOINT_DIR}" "${HYDRA_DIR}" \
-         "${PIP_CACHE_DIR}" "${HF_HOME}" "${HF_DATASETS_CACHE}" \
-         "${HF_MODULES_CACHE}" "${TRANSFORMERS_CACHE}" \
-         "${DEEPSPEED_CACHE_DIR}" "${TRITON_CACHE_DIR}" \
-         "${WANDB_DIR}" "${TORCH_HOME}" "${XDG_CACHE_HOME}" \
-         "${PYTORCH_LIGHTNING_HOME}"
-
-if [[ -z "${SLURM_TMPDIR:-}" ]]; then
-  mkdir -p "${TMPDIR}"
-fi
 
 PYTHON_USER_SITE=$(apptainer exec "${COMMON_APPTAINER_ARGS_BASE[@]}" "${SIF_PATH}" \
   python3.10 -c 'import site, sys; sys.stdout.write(site.getusersitepackages())')
 
 if [[ -z "${PYTHON_USER_SITE}" ]]; then
-  echo "[sudoku-trm-10steps] Failed to resolve python user site directory" >&2
+  echo "[mhc-triton-tests] Failed to resolve python user site directory" >&2
   exit 1
 fi
 
@@ -114,19 +82,14 @@ cd "${REPO_DIR}"
 apptainer exec --nv "${COMMON_APPTAINER_ARGS[@]}" \
   "${SIF_PATH}" bash -lc "
     set -euo pipefail
-    python3.10 pretrain.py \
-      arch=trm_mhc \
-      data_paths=[\"${DATA_DIR}\"] \
-      evaluators=\"[]\" \
-      epochs=50000 eval_interval=5000 \
-      lr=1e-4 puzzle_emb_lr=1e-4 weight_decay=1.0 puzzle_emb_weight_decay=1.0 \
-      arch.L_layers=2 \
-      arch.H_cycles=2 arch.L_cycles=5 \
-      arch.mhc_streams=4 \
-      +arch.act_enabled=False \
-      +run_name=${RUN_NAME} \
-      project_name=${PROJECT_NAME} \
-      checkpoint_path=\"${CHECKPOINT_DIR}\" \
-      hydra.run.dir=\"${HYDRA_DIR}\" \
-      ema=True
+    export PYTHONUSERBASE=\"${PYTHON_USER_BASE}\"
+    export PIP_USER=1
+    if ! python3.10 -c \"import pytest\" >/dev/null 2>&1; then
+      if ! python3.10 -m pip install --user pytest; then
+        TARGET_DIR=\"${PYTHON_USER_BASE}/lib/python3.10/site-packages\"
+        mkdir -p \"\${TARGET_DIR}\"
+        python3.10 -m pip install --target \"\${TARGET_DIR}\" pytest
+      fi
+    fi
+    python3.10 -m pytest -q tests/models/recursive_reasoning/test_mhc_triton.py
   "

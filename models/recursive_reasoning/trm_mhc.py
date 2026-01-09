@@ -13,6 +13,11 @@ from models.sparse_embedding import CastedSparseEmbedding
 
 IGNORE_LABEL_ID = -100
 
+try:  # optional Triton path
+    from models.recursive_reasoning import mhc_triton
+except Exception:  # pragma: no cover
+    mhc_triton = None
+
 
 class RMSNorm(nn.Module):
     def __init__(self, dim: int, eps: float = 1e-8) -> None:
@@ -72,6 +77,8 @@ class ManifoldHyperConnectionLayer(nn.Module):
         eps: float = 1e-6,
         sinkhorn_tau: float = 0.05,
         alpha_init: float = 1e-2,
+        use_triton: bool = False,
+        triton_backward: bool = False,
     ) -> None:
         super().__init__()
         self.hidden_dim = hidden_dim
@@ -80,6 +87,8 @@ class ManifoldHyperConnectionLayer(nn.Module):
         self.sinkhorn_iters = sinkhorn_iters
         self.eps = eps
         self.sinkhorn_tau = sinkhorn_tau
+        self.use_triton = use_triton and (mhc_triton is not None)
+        self.triton_backward = triton_backward
 
         d = hidden_dim * n_streams
         self.rms = RMSNorm(d)
@@ -117,9 +126,17 @@ class ManifoldHyperConnectionLayer(nn.Module):
         H_post = 2.0 * torch.sigmoid(H_post_tilde)
 
         H_res = H_res_tilde.view(B * S, n, n)
-        H_res = sinkhorn_log_doubly_stochastic(
-            H_res, n_iters=self.sinkhorn_iters, tau=self.sinkhorn_tau
-        )
+        if self.use_triton and x_streams.is_cuda:
+            H_res = mhc_triton.sinkhorn_log_triton_autograd(
+                H_res,
+                n_iters=self.sinkhorn_iters,
+                tau=self.sinkhorn_tau,
+                use_triton_backward=self.triton_backward,
+            )
+        else:
+            H_res = sinkhorn_log_doubly_stochastic(
+                H_res, n_iters=self.sinkhorn_iters, tau=self.sinkhorn_tau
+            )
 
         H_pre = H_pre.view(B, S, n)
         H_post = H_post.view(B, S, n)
@@ -129,16 +146,24 @@ class ManifoldHyperConnectionLayer(nn.Module):
         H_post_weights = H_post / (H_post.sum(dim=-1, keepdim=True) + self.eps)
 
         dtype = x_streams.dtype
-        H_pre_weights = H_pre_weights.to(dtype)
-        H_post_weights = H_post_weights.to(dtype)
-        H_res = H_res.to(dtype)
+        H_pre_weights = H_pre_weights.to(torch.float32)
+        H_post_weights = H_post_weights.to(torch.float32)
+        H_res = H_res.to(torch.float32)
 
-        x_layer = torch.einsum("bsnc,bsn->bsc", x_streams, H_pre_weights)
+        if self.use_triton and x_streams.is_cuda:
+            x_layer = mhc_triton.pre_aggregate_triton_autograd(x_streams, H_pre_weights)
+        else:
+            x_layer = torch.einsum("bsnc,bsn->bsc", x_streams, H_pre_weights.to(dtype))
         x_layer = x_layer.to(dtype)
-        y = self.sublayer(x_layer, **sublayer_kwargs)
-        y_expanded = H_post_weights.unsqueeze(-1) * y.unsqueeze(2)
 
-        x_mixed = torch.einsum("bsic,bsoi->bsoc", x_streams, H_res)
+        y = self.sublayer(x_layer, **sublayer_kwargs)
+        y_expanded = H_post_weights.to(dtype).unsqueeze(-1) * y.unsqueeze(2)
+
+        if self.use_triton and x_streams.is_cuda:
+            x_mixed = mhc_triton.residual_mix_triton_autograd(x_streams, H_res)
+        else:
+            x_mixed = torch.einsum("bsic,bsoi->bsoc", x_streams, H_res.to(dtype))
+        x_mixed = x_mixed.to(dtype)
         return x_mixed + y_expanded
 
 @dataclass
@@ -198,6 +223,8 @@ class TinyRecursiveReasoningModel_ACTV1Config(BaseModel):
     mhc_eps: float = 1e-6
     mhc_sinkhorn_tau: float = 0.05
     mhc_alpha_init: float = 1e-2
+    mhc_use_triton: bool = False
+    mhc_sinkhorn_triton_backward: bool = False
 
 class TinyRecursiveReasoningModel_ACTV1Block(nn.Module):
     def __init__(self, config: TinyRecursiveReasoningModel_ACTV1Config) -> None:
@@ -226,6 +253,8 @@ class TinyRecursiveReasoningModel_ACTV1Block(nn.Module):
                 eps=config.mhc_eps,
                 sinkhorn_tau=config.mhc_sinkhorn_tau,
                 alpha_init=config.mhc_alpha_init,
+                use_triton=config.mhc_use_triton,
+                triton_backward=config.mhc_sinkhorn_triton_backward,
             )
         self.mlp = SwiGLU(
             hidden_size=config.hidden_size,
@@ -240,6 +269,8 @@ class TinyRecursiveReasoningModel_ACTV1Block(nn.Module):
                 eps=config.mhc_eps,
                 sinkhorn_tau=config.mhc_sinkhorn_tau,
                 alpha_init=config.mhc_alpha_init,
+                use_triton=config.mhc_use_triton,
+                triton_backward=config.mhc_sinkhorn_triton_backward,
             )
         self.norm_eps = config.rms_norm_eps
 
