@@ -1,5 +1,6 @@
 import math
 import os
+import time
 import torch
 import torch.nn as nn
 import triton
@@ -594,5 +595,80 @@ def test_correctness():
     out_t.backward(torch.randn_like(out_t))
     print("✅ Backward Runs")
 
+def _bench_once(fn, iters=50, warmup=10):
+    for _ in range(warmup):
+        fn()
+    torch.cuda.synchronize()
+    t0 = time.time()
+    for _ in range(iters):
+        fn()
+    torch.cuda.synchronize()
+    t1 = time.time()
+    return (t1 - t0) * 1000.0 / iters
+
+def benchmark():
+    print("\n--- Running Benchmarks ---")
+    torch.manual_seed(42)
+    B, C, N = 16, 128, 4
+    inner = nn.Linear(C, C).cuda()
+    model = MHC(inner, C, n=N).cuda().to(torch.bfloat16)
+
+    class NaiveMHC(nn.Module):
+        def __init__(self): super().__init__()
+        def forward(self, x):
+            x_flat = x.view(B, -1).float()
+            r = x_flat.norm(dim=1, keepdim=True) / math.sqrt(N*C)
+            r = torch.clamp(r, min=EPS_R)
+            phi_f = model.phi.float()
+            y_res = (x_flat @ phi_f[:, 0:16]) / r; y_pre = (x_flat @ phi_f[:, 16:32]) / r; y_post = (x_flat @ phi_f[:, 32:48]) / r
+            y_res = y_res[:, :N*N] * model.alpha_res + model.b[:N*N]
+            y_pre = y_pre[:, :N] * model.alpha_pre + model.b[16:16+N]
+            y_post = y_post[:, :N] * model.alpha_post + model.b[32:32+N]
+            h_pre = torch.sigmoid(y_pre); h_post = 2 * torch.sigmoid(y_post)
+            M = torch.exp(y_res.view(B, N, N))
+            for _ in range(_get_sinkhorn_iters()):
+                M = M / (M.sum(dim=2, keepdim=True) + 1e-12); M = M / (M.sum(dim=1, keepdim=True) + 1e-12)
+            h_res = M.view(B, N*N)
+            z = (h_pre.unsqueeze(2) * x.float()).sum(dim=1); y_inner = inner(z.to(x.dtype)).float()
+            return torch.einsum('bij,bjc->bic', h_res.view(B, N, N), x.float()) + h_post.unsqueeze(2) * y_inner.unsqueeze(1)
+
+    naive = NaiveMHC().cuda()
+    x = torch.randn(B, N, C, device='cuda', dtype=torch.bfloat16, requires_grad=True)
+
+    def fwd_mhc():
+        y = model(x)
+        return y
+
+    def fwd_naive():
+        y = naive(x)
+        return y
+
+    def bwd_mhc():
+        y = model(x)
+        loss = y.float().sum()
+        loss.backward()
+        x.grad = None
+
+    def bwd_naive():
+        y = naive(x)
+        loss = y.float().sum()
+        loss.backward()
+        x.grad = None
+
+    fwd_mhc_ms = _bench_once(fwd_mhc)
+    fwd_naive_ms = _bench_once(fwd_naive)
+    bwd_mhc_ms = _bench_once(bwd_mhc)
+    bwd_naive_ms = _bench_once(bwd_naive)
+
+    print(f"Forward mHC:  {fwd_mhc_ms:.3f} ms")
+    print(f"Forward Naive:{fwd_naive_ms:.3f} ms")
+    print(f"Speedup (F):  {fwd_naive_ms / fwd_mhc_ms:.2f}x")
+    print(f"Backward mHC: {bwd_mhc_ms:.3f} ms")
+    print(f"Backward Naive:{bwd_naive_ms:.3f} ms")
+    print(f"Speedup (B):  {bwd_naive_ms / bwd_mhc_ms:.2f}x")
+
 if __name__ == "__main__":
-    if torch.cuda.is_available(): test_correctness()
+    if torch.cuda.is_available():
+        test_correctness()
+        if bool(int(os.environ.get("MHC_BENCH", "0"))):
+            benchmark()
