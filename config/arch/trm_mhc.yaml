@@ -43,5 +43,4 @@ mhc_sinkhorn_iters: 20
 mhc_eps: 1e-6
 mhc_sinkhorn_tau: 0.05
 mhc_alpha_init: 1e-2
-mhc_use_triton: false
-mhc_sinkhorn_triton_backward: false
+mhc_use_dynamic_h: true

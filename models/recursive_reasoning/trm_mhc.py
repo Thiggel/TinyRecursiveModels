@@ -2,51 +2,20 @@ from typing import Tuple, Dict
 from dataclasses import dataclass
 import math
 import torch
-import copy
 import torch.nn.functional as F
 from torch import nn
 from pydantic import BaseModel
-import random
+try:
+    from models.recursive_reasoning.sinkhorn_triton_log import sinkhorn_log_triton_autograd
+except Exception as exc:  # pragma: no cover - optional dependency
+    raise RuntimeError(
+        "Triton sinkhorn extension not available. Ensure Triton is installed in the Apptainer image."
+    ) from exc
 from models.common import trunc_normal_init_
 from models.layers import rms_norm, SwiGLU, Attention, RotaryEmbedding, CosSin, CastedEmbedding, CastedLinear
 from models.sparse_embedding import CastedSparseEmbedding
 
 IGNORE_LABEL_ID = -100
-
-try:  # optional Triton path
-    from models.recursive_reasoning import mhc_triton
-except Exception:  # pragma: no cover
-    mhc_triton = None
-
-
-class RMSNorm(nn.Module):
-    def __init__(self, dim: int, eps: float = 1e-8) -> None:
-        super().__init__()
-        self.eps = eps
-        self.weight = nn.Parameter(torch.ones(dim))
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        input_dtype = x.dtype
-        x = x.to(torch.float32)
-        rms = x.pow(2).mean(dim=-1, keepdim=True)
-        x = x * torch.rsqrt(rms + self.eps)
-        return (x.to(input_dtype) * self.weight.to(input_dtype))
-
-
-def sinkhorn_log_doubly_stochastic(logits: torch.Tensor, n_iters: int = 20, tau: float = 0.05) -> torch.Tensor:
-    n = logits.shape[-1]
-    Z = logits / tau
-    log_marginal = torch.zeros((n,), device=logits.device, dtype=logits.dtype)
-
-    u = torch.zeros(logits.shape[:-1], device=Z.device, dtype=Z.dtype)
-    v = torch.zeros_like(u)
-
-    for _ in range(n_iters):
-        u = log_marginal - torch.logsumexp(Z + v.unsqueeze(-2), dim=-1)
-        v = log_marginal - torch.logsumexp(Z + u.unsqueeze(-1), dim=-2)
-
-    return torch.exp(Z + u.unsqueeze(-1) + v.unsqueeze(-2))
-
 
 class MHCAttentionSubLayer(nn.Module):
     def __init__(self, attention: Attention) -> None:
@@ -77,8 +46,7 @@ class ManifoldHyperConnectionLayer(nn.Module):
         eps: float = 1e-6,
         sinkhorn_tau: float = 0.05,
         alpha_init: float = 1e-2,
-        use_triton: bool = False,
-        triton_backward: bool = False,
+        use_dynamic_h: bool = True,
     ) -> None:
         super().__init__()
         self.hidden_dim = hidden_dim
@@ -87,28 +55,28 @@ class ManifoldHyperConnectionLayer(nn.Module):
         self.sinkhorn_iters = sinkhorn_iters
         self.eps = eps
         self.sinkhorn_tau = sinkhorn_tau
-        self.use_triton = use_triton and (mhc_triton is not None)
-        self.triton_backward = triton_backward
+        self.use_dynamic_h = use_dynamic_h
 
         d = hidden_dim * n_streams
-        self.rms = RMSNorm(d)
+        self.rms_weight = nn.Parameter(torch.ones(d, dtype=torch.float32))
 
-        self.fc_pre = nn.Linear(d, n_streams, bias=False)
-        self.fc_post = nn.Linear(d, n_streams, bias=False)
-        self.fc_res = nn.Linear(d, n_streams * n_streams, bias=False)
+        if use_dynamic_h:
+            self.fc_pre = nn.Linear(d, n_streams, bias=False)
+            self.fc_post = nn.Linear(d, n_streams, bias=False)
+            self.fc_res = nn.Linear(d, n_streams * n_streams, bias=False)
 
-        self.bias_pre = nn.Parameter(torch.zeros(n_streams))
-        self.bias_post = nn.Parameter(torch.zeros(n_streams))
-        self.bias_res = nn.Parameter(torch.zeros(n_streams * n_streams))
+            self.bias_pre = nn.Parameter(torch.zeros(n_streams))
+            self.bias_post = nn.Parameter(torch.zeros(n_streams))
+            self.bias_res = nn.Parameter(torch.zeros(n_streams * n_streams))
 
-        self.alpha_pre = nn.Parameter(torch.zeros(1))
-        self.alpha_post = nn.Parameter(torch.zeros(1))
-        self.alpha_res = nn.Parameter(torch.zeros(1))
-
-        with torch.no_grad():
-            self.alpha_pre.fill_(alpha_init)
-            self.alpha_post.fill_(alpha_init)
-            self.alpha_res.fill_(alpha_init)
+            self.alpha_pre = nn.Parameter(torch.tensor(alpha_init))
+            self.alpha_post = nn.Parameter(torch.tensor(alpha_init))
+            self.alpha_res = nn.Parameter(torch.tensor(alpha_init))
+        else:
+            self.H_pre = nn.Parameter(torch.zeros(n_streams, dtype=torch.float32))
+            self.H_post = nn.Parameter(torch.zeros(n_streams, dtype=torch.float32))
+            H_res_init = alpha_init * torch.randn(n_streams, n_streams)
+            self.H_res = nn.Parameter(H_res_init.float())
 
     def forward(self, x_streams: torch.Tensor, **sublayer_kwargs) -> torch.Tensor:
         B, S, n, C = x_streams.shape
@@ -116,27 +84,27 @@ class ManifoldHyperConnectionLayer(nn.Module):
         d = n * C
 
         x_flat = x_streams.reshape(B * S, d).to(torch.float32)
-        x_norm = self.rms(x_flat)
+        rms = x_flat.pow(2).mean(dim=-1, keepdim=True)
+        x_norm = x_flat * torch.rsqrt(rms + self.eps) * self.rms_weight
 
-        H_pre_tilde = self.alpha_pre * self.fc_pre(x_norm) + self.bias_pre
-        H_post_tilde = self.alpha_post * self.fc_post(x_norm) + self.bias_post
-        H_res_tilde = self.alpha_res * self.fc_res(x_norm) + self.bias_res
-
-        H_pre = torch.sigmoid(H_pre_tilde)
-        H_post = 2.0 * torch.sigmoid(H_post_tilde)
-
-        H_res = H_res_tilde.view(B * S, n, n)
-        if self.use_triton and x_streams.is_cuda:
-            H_res = mhc_triton.sinkhorn_log_triton_autograd(
-                H_res,
-                n_iters=self.sinkhorn_iters,
-                tau=self.sinkhorn_tau,
-                use_triton_backward=self.triton_backward,
+        if self.use_dynamic_h:
+            H_pre_tilde = self.alpha_pre * self.fc_pre(x_norm) + self.bias_pre
+            H_post_tilde = self.alpha_post * self.fc_post(x_norm) + self.bias_post
+            H_res_tilde = self.alpha_res * self.fc_res(x_norm) + self.bias_res
+            H_pre = torch.sigmoid(H_pre_tilde)
+            H_post = 2.0 * torch.sigmoid(H_post_tilde)
+            H_res_logits = H_res_tilde.view(B * S, n, n) / self.sinkhorn_tau
+            H_res = sinkhorn_log_triton_autograd(
+                H_res_logits, n_iters=self.sinkhorn_iters, tau=1.0
             )
         else:
-            H_res = sinkhorn_log_doubly_stochastic(
-                H_res, n_iters=self.sinkhorn_iters, tau=self.sinkhorn_tau
-            )
+            H_pre = torch.sigmoid(self.H_pre).expand(B * S, n)
+            H_post = 2.0 * torch.sigmoid(self.H_post).expand(B * S, n)
+            H_res_logits = self.H_res / self.sinkhorn_tau
+            H_res = sinkhorn_log_triton_autograd(
+                H_res_logits.unsqueeze(0), n_iters=self.sinkhorn_iters, tau=1.0
+            ).squeeze(0)
+            H_res = H_res.expand(B * S, n, n)
 
         H_pre = H_pre.view(B, S, n)
         H_post = H_post.view(B, S, n)
@@ -146,24 +114,15 @@ class ManifoldHyperConnectionLayer(nn.Module):
         H_post_weights = H_post / (H_post.sum(dim=-1, keepdim=True) + self.eps)
 
         dtype = x_streams.dtype
-        H_pre_weights = H_pre_weights.to(torch.float32)
-        H_post_weights = H_post_weights.to(torch.float32)
-        H_res = H_res.to(torch.float32)
-
-        if self.use_triton and x_streams.is_cuda:
-            x_layer = mhc_triton.pre_aggregate_triton_autograd(x_streams, H_pre_weights)
-        else:
-            x_layer = torch.einsum("bsnc,bsn->bsc", x_streams, H_pre_weights.to(dtype))
-        x_layer = x_layer.to(dtype)
-
+        x_2d = x_streams.reshape(B * S, n, C).to(dtype)
+        h_pre = H_pre_weights.reshape(B * S, 1, n).to(dtype)
+        x_layer = torch.bmm(h_pre, x_2d).squeeze(1)
+        x_layer = x_layer.view(B, S, C)
         y = self.sublayer(x_layer, **sublayer_kwargs)
         y_expanded = H_post_weights.to(dtype).unsqueeze(-1) * y.unsqueeze(2)
 
-        if self.use_triton and x_streams.is_cuda:
-            x_mixed = mhc_triton.residual_mix_triton_autograd(x_streams, H_res)
-        else:
-            x_mixed = torch.einsum("bsic,bsoi->bsoc", x_streams, H_res.to(dtype))
-        x_mixed = x_mixed.to(dtype)
+        h_res = H_res.reshape(B * S, n, n).to(dtype)
+        x_mixed = torch.bmm(h_res, x_2d).view(B, S, n, C)
         return x_mixed + y_expanded
 
 @dataclass
@@ -223,8 +182,7 @@ class TinyRecursiveReasoningModel_ACTV1Config(BaseModel):
     mhc_eps: float = 1e-6
     mhc_sinkhorn_tau: float = 0.05
     mhc_alpha_init: float = 1e-2
-    mhc_use_triton: bool = False
-    mhc_sinkhorn_triton_backward: bool = False
+    mhc_use_dynamic_h: bool = True
 
 class TinyRecursiveReasoningModel_ACTV1Block(nn.Module):
     def __init__(self, config: TinyRecursiveReasoningModel_ACTV1Config) -> None:
@@ -253,8 +211,7 @@ class TinyRecursiveReasoningModel_ACTV1Block(nn.Module):
                 eps=config.mhc_eps,
                 sinkhorn_tau=config.mhc_sinkhorn_tau,
                 alpha_init=config.mhc_alpha_init,
-                use_triton=config.mhc_use_triton,
-                triton_backward=config.mhc_sinkhorn_triton_backward,
+                use_dynamic_h=config.mhc_use_dynamic_h,
             )
         self.mlp = SwiGLU(
             hidden_size=config.hidden_size,
@@ -269,8 +226,7 @@ class TinyRecursiveReasoningModel_ACTV1Block(nn.Module):
                 eps=config.mhc_eps,
                 sinkhorn_tau=config.mhc_sinkhorn_tau,
                 alpha_init=config.mhc_alpha_init,
-                use_triton=config.mhc_use_triton,
-                triton_backward=config.mhc_sinkhorn_triton_backward,
+                use_dynamic_h=config.mhc_use_dynamic_h,
             )
         self.norm_eps = config.rms_norm_eps
 

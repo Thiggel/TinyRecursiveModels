@@ -42,7 +42,7 @@ PYTORCH_LIGHTNING_HOME="${BASE_CACHE_DIR}/lightning_logs"
 HYDRA_BASE_DIR="${WORK_ROOT}/hydra"
 CHECKPOINT_ROOT="${WORK_ROOT}/checkpoints"
 JOB_LOG_DIR="job_logs"
-PYTHON_USER_BASE="${WORK_ROOT}/python"
+PYTHON_USER_BASE="${PYTHONUSERBASE:-${WORK_ROOT}/python}"
 PIP_CACHE_DIR="${BASE_CACHE_DIR}/pip-cache"
 TMPDIR="${SLURM_TMPDIR:-${BASE_CACHE_DIR}/.tmp}"
 
@@ -60,7 +60,7 @@ mkdir -p "${JOB_LOG_DIR}" "${CHECKPOINT_DIR}" "${HYDRA_DIR}" \
          "${PIP_CACHE_DIR}" "${HF_HOME}" "${HF_DATASETS_CACHE}" \
          "${HF_MODULES_CACHE}" "${TRANSFORMERS_CACHE}" \
          "${DEEPSPEED_CACHE_DIR}" "${TRITON_CACHE_DIR}" \
-         "${WANDB_DIR}" "${TORCH_HOME}" "${XDG_CACHE_HOME}" \
+         "${WANDB_DIR}" "${TORCH_HOME}" "${XDG_CACHE_HOME}" "${PYTHON_USER_BASE}" \
          "${PYTORCH_LIGHTNING_HOME}"
 
 COMMON_APPTAINER_ARGS_BASE=(
@@ -68,6 +68,7 @@ COMMON_APPTAINER_ARGS_BASE=(
   --bind "${WORK}:${WORK}"
   --bind "${SCRATCH}:${SCRATCH}"
   --bind "${REPO_DIR}:${REPO_DIR}"
+  --bind "${PYTHON_USER_BASE}:${PYTHON_USER_BASE}"
   --pwd "${REPO_DIR}"
   --env http_proxy=http://proxy:80
   --env https_proxy=http://proxy:80
@@ -128,6 +129,15 @@ cd "${REPO_DIR}"
 apptainer exec --nv "${COMMON_APPTAINER_ARGS[@]}" \
   "${SIF_PATH}" bash -lc "
     set -euo pipefail
+    export PYTHONUSERBASE=\"${PYTHON_USER_BASE}\"
+    export PYTHONPATH=\"${PYTHON_USER_SITE}\"
+    python3.10 - <<'PY'
+import site, os
+print('[sudoku-trm-mhc] PYTHONUSERBASE=', os.environ.get('PYTHONUSERBASE'))
+print('[sudoku-trm-mhc] usersite=', site.getusersitepackages())
+import mhc  # noqa: F401
+print('[sudoku-trm-mhc] mhc import ok')
+PY
     python3.10 pretrain.py \
       arch=trm_mhc \
       data_paths=[\"${DATA_DIR}\"] \
@@ -137,6 +147,7 @@ apptainer exec --nv "${COMMON_APPTAINER_ARGS[@]}" \
       arch.L_layers=2 \
       arch.H_cycles=3 arch.L_cycles=6 \
       arch.mhc_streams=4 \
+      arch.mhc_use_dynamic_h=true \
       +run_name=${RUN_NAME} \
       project_name=${PROJECT_NAME} \
       checkpoint_path=\"${CHECKPOINT_DIR}\" \

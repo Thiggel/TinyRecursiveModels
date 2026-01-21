@@ -12,7 +12,7 @@ SCRATCH_ROOT="${SCRATCH}/${REPO_NAME}"
 SIF_DIR="${WORK_ROOT}/containers"
 SIF_PATH="${SIF_DIR}/pytorch.sif"
 DATA_ROOT="${WORK_ROOT}/data"
-PYTHON_USER_BASE="${WORK_ROOT}/python"
+PYTHON_USER_BASE="${PYTHONUSERBASE:-${WORK_ROOT}/python}"
 PYTHON_BIN=python3.10
 
 BASE_CACHE_DIR="${SCRATCH_ROOT}"
@@ -56,6 +56,7 @@ fi
 
 cd "${REPO_DIR}"
 
+
 FORCE_REBUILD=0
 if [[ "${1:-}" == "--force-build" ]]; then
   FORCE_REBUILD=1
@@ -89,6 +90,7 @@ COMMON_APPTAINER_ARGS_BASE=(
   --bind "${WORK}:${WORK}"
   --bind "${SCRATCH}:${SCRATCH}"
   --bind "${REPO_DIR}:${REPO_DIR}"
+  --bind "${PYTHON_USER_BASE}:${PYTHON_USER_BASE}"
   --pwd "${REPO_DIR}"
   --env http_proxy=http://proxy:80
   --env https_proxy=http://proxy:80
@@ -115,6 +117,16 @@ COMMON_APPTAINER_ARGS_BASE=(
   --env TMPDIR="${TMPDIR}"
 )
 
+if [[ -n "${CUDA_HOME:-}" ]]; then
+  COMMON_APPTAINER_ARGS_BASE+=(
+    --bind "${CUDA_HOME}:${CUDA_HOME}"
+    --env CUDA_HOME="${CUDA_HOME}"
+    --env CUDACXX="${CUDA_HOME}/bin/nvcc"
+    --env PATH="${CUDA_HOME}/bin:\$PATH"
+    --env LD_LIBRARY_PATH="${CUDA_HOME}/lib64:\$LD_LIBRARY_PATH"
+  )
+fi
+
 PYTHON_USER_SITE=$(apptainer exec "${COMMON_APPTAINER_ARGS_BASE[@]}" "${SIF_PATH}" \
   "${PYTHON_BIN}" -c 'import site, sys; sys.stdout.write(site.getusersitepackages())')
 
@@ -130,6 +142,7 @@ PIP_EXEC=(apptainer exec "${COMMON_APPTAINER_ARGS[@]}" "${SIF_PATH}")
 "${PIP_EXEC[@]}" "${PYTHON_BIN}" -m pip install --user --upgrade pip wheel setuptools
 "${PIP_EXEC[@]}" "${PYTHON_BIN}" -m pip install --user -r requirements.txt
 "${PIP_EXEC[@]}" "${PYTHON_BIN}" -c "import adam_atan2_pytorch" >/dev/null
+
 
 apptainer exec --nv "${COMMON_APPTAINER_ARGS[@]}" \
   --env DATA_ROOT="${DATA_ROOT}" \

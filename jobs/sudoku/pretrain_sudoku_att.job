@@ -109,6 +109,20 @@ fi
 
 COMMON_APPTAINER_ARGS=("${COMMON_APPTAINER_ARGS_BASE[@]}" --env "PYTHONPATH=${PYTHON_USER_SITE}")
 
+LATEST_CKPT=""
+LOAD_CHECKPOINT_ARG=""
+if compgen -G "${CHECKPOINT_DIR}/step_*" > /dev/null; then
+  LATEST_CKPT=$(ls -1 "${CHECKPOINT_DIR}"/step_* 2>/dev/null | grep -v '_all_preds' | sort -V | tail -1 || true)
+  if [[ -n "${LATEST_CKPT}" ]]; then
+    echo "[sudoku-trm-mhc] Resuming from checkpoint ${LATEST_CKPT}"
+    LOAD_CHECKPOINT_ARG="load_checkpoint=\"${LATEST_CKPT}\""
+  else
+    echo "[sudoku-trm-mhc] No checkpoint files found under ${CHECKPOINT_DIR}, starting fresh."
+  fi
+else
+  echo "[sudoku-trm-mhc] No checkpoint files found under ${CHECKPOINT_DIR}, starting fresh."
+fi
+
 cd "${REPO_DIR}"
 
 apptainer exec --nv "${COMMON_APPTAINER_ARGS[@]}" \
@@ -125,6 +139,7 @@ apptainer exec --nv "${COMMON_APPTAINER_ARGS[@]}" \
       +run_name=${RUN_NAME} \
       project_name=${PROJECT_NAME} \
       checkpoint_path=\"${CHECKPOINT_DIR}\" \
+      ${LOAD_CHECKPOINT_ARG} \
       hydra.run.dir=\"${HYDRA_DIR}\" \
       ema=True
   "
